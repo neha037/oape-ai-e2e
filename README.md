@@ -2,6 +2,21 @@
 
 AI-driven Feature Development tools.
 
+## Pre-requisites
+
+The following tools must be installed and available on your system:
+
+- **Git**
+- **Go**: [go.dev/dl](https://go.dev/dl/)
+- **GitHub CLI (`gh`)**: [cli.github.com](https://cli.github.com/)
+- **make**: eg. `make generate`, `make build`, etc.
+
+The container image used in [Dockerfile](./Dockerfile) already adds these dependencies, but you need to manage the credentials inside the container.
+
+### Optional
+
+- **`JIRA_PERSONAL_TOKEN`** environment variable -- required only for `/oape:analyze-rfe` (Jira API access).
+
 ## Installation
 
 Add the marketplace:
@@ -143,6 +158,27 @@ Automatically applies code fixes from a review report.
 
 # Step 6: Generate e2e tests for your changes
 /oape:e2e-generate main
+```
+
+## Deployment
+
+Deploy the Python web server to run as a container or as a pod on a Kubernetes cluster. The web traffic port on the container is 8000.
+
+### Build the container image
+
+```shell
+podman build -t ghcr.io/shiftweek/oape-ai-e2e:latest .
+podman push ghcr.io/shiftweek/oape-ai-e2e:latest
+```
+
+### Configure the deployment
+
+Edit `deploy/deployment.yaml` and fill in the required values which are placeholders for sensitive values.
+
+### Deploy on a k8s cluster
+
+```shell
+oc apply -f deploy/deployment.yaml   # or kubectl apply -f deploy/deployment.yaml
 ```
 
 ### Adding a New Command
