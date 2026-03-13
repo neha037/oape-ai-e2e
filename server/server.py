@@ -41,6 +41,10 @@ RFE_INPUT_PATTERN = re.compile(
     r"^(?:https://issues\.redhat\.com/browse/)?([A-Z]+-\d+)/?$",
     re.IGNORECASE,
 )
+# GitHub Gist URL patterns
+GIST_URL_PATTERN = re.compile(
+    r"^https://gist\.github(usercontent)?\.com/([a-zA-Z0-9_-]+/)?[a-f0-9]+(/raw)?.*$"
+)
 
 # ---------------------------------------------------------------------------
 # In-memory job store
@@ -48,14 +52,68 @@ RFE_INPUT_PATTERN = re.compile(
 jobs: dict[str, dict] = {}
 
 
-def _validate_ep_url(ep_url: str) -> None:
-    """Raise HTTPException if ep_url is not a valid enhancement PR URL."""
+def _validate_ep_url(ep_url: str, required: bool = True) -> None:
+    """Raise HTTPException if ep_url is not a valid enhancement PR URL.
+    
+    Args:
+        ep_url: The enhancement PR URL to validate.
+        required: If True, raises error when ep_url is empty. If False, empty is allowed.
+    """
+    if not ep_url:
+        if required:
+            raise HTTPException(
+                status_code=400,
+                detail="Enhancement PR URL is required. "
+                "Expected format: https://github.com/openshift/enhancements/pull/<number>",
+            )
+        return
+    
     if not EP_URL_PATTERN.match(ep_url.rstrip("/")):
         raise HTTPException(
             status_code=400,
             detail="Invalid enhancement PR URL. "
             "Expected format: https://github.com/openshift/enhancements/pull/<number>",
         )
+
+
+def _validate_gist_url(gist_url: str, required: bool = False) -> None:
+    """Raise HTTPException if gist_url is not a valid GitHub Gist URL.
+    
+    Args:
+        gist_url: The gist URL to validate.
+        required: If True, raises error when gist_url is empty.
+    """
+    if not gist_url:
+        if required:
+            raise HTTPException(
+                status_code=400,
+                detail="Design document (gist) URL is required. "
+                "Expected format: https://gist.github.com/[username/]<gist_id>",
+            )
+        return
+    
+    if not GIST_URL_PATTERN.match(gist_url.rstrip("/")):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid design document URL. "
+            "Expected format: https://gist.github.com/[username/]<gist_id>",
+        )
+
+
+def _validate_inputs(ep_url: str, design_doc_url: str) -> None:
+    """Validate that at least one input source is provided and both are valid if present."""
+    if not ep_url and not design_doc_url:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one input source is required: "
+            "enhancement PR URL and/or design document (gist) URL.",
+        )
+    
+    if ep_url:
+        _validate_ep_url(ep_url, required=False)
+    
+    if design_doc_url:
+        _validate_gist_url(design_doc_url, required=False)
 
 
 def _validate_rfe_input(value: str) -> None:
@@ -91,15 +149,21 @@ async def homepage():
 
 @app.post("/submit")
 async def submit_job(
-    ep_url: str = Form(...),
+    ep_url: str = Form(default=""),
+    design_doc_url: str = Form(default=""),
     command: str = Form(default="api-implement"),
     cwd: str = Form(default=""),
 ):
-    """Validate inputs, create a background job, and return its ID."""
+    """Validate inputs, create a background job, and return its ID.
+    
+    At least one of ep_url or design_doc_url must be provided for api-generate
+    and api-implement commands.
+    """
     if command == "analyze-rfe":
         _validate_rfe_input(ep_url)
     else:
-        _validate_ep_url(ep_url)
+        _validate_inputs(ep_url, design_doc_url)
+    
     if command not in SUPPORTED_COMMANDS:
         raise HTTPException(
             status_code=400,
@@ -112,6 +176,7 @@ async def submit_job(
     jobs[job_id] = {
         "status": "running",
         "ep_url": ep_url,
+        "design_doc_url": design_doc_url,
         "cwd": working_dir,
         "conversation": [],
         "message_event": asyncio.Condition(),
@@ -119,7 +184,7 @@ async def submit_job(
         "cost_usd": 0.0,
         "error": None,
     }
-    asyncio.create_task(_run_job(job_id, command, ep_url, working_dir))
+    asyncio.create_task(_run_job(job_id, command, ep_url, design_doc_url, working_dir))
     return {"job_id": job_id}
 
 
@@ -132,6 +197,7 @@ async def job_status(job_id: str):
     return {
         "status": job["status"],
         "ep_url": job["ep_url"],
+        "design_doc_url": job.get("design_doc_url", ""),
         "cwd": job["cwd"],
         "output": job.get("output", ""),
         "cost_usd": job.get("cost_usd", 0.0),
@@ -184,7 +250,9 @@ async def stream_job(job_id: str):
     return EventSourceResponse(event_generator())
 
 
-async def _run_job(job_id: str, command: str, ep_url: str, working_dir: str):
+async def _run_job(
+    job_id: str, command: str, ep_url: str, design_doc_url: str, working_dir: str
+):
     """Run the Claude agent in the background and stream messages to the job store."""
     condition = jobs[job_id]["message_event"]
 
@@ -194,7 +262,9 @@ async def _run_job(job_id: str, command: str, ep_url: str, working_dir: str):
         jobs[job_id]["conversation"].append(msg)
         loop.create_task(_notify(condition))
 
-    result = await run_agent(command, ep_url, working_dir, on_message=on_message)
+    result = await run_agent(
+        command, ep_url, working_dir, design_doc_url=design_doc_url, on_message=on_message
+    )
     if result.success:
         jobs[job_id]["status"] = "success"
         jobs[job_id]["output"] = result.output
@@ -217,9 +287,16 @@ async def _notify(condition: asyncio.Condition) -> None:
 @app.get("/api/v1/oape-api-implement")
 async def api_implement(
     ep_url: str = Query(
-        ...,
+        default="",
         description="GitHub PR URL for the OpenShift enhancement proposal "
-        "(e.g. https://github.com/openshift/enhancements/pull/1234)",
+        "(e.g. https://github.com/openshift/enhancements/pull/1234). "
+        "At least one of ep_url or design_doc_url must be provided.",
+    ),
+    design_doc_url: str = Query(
+        default="",
+        description="GitHub Gist URL containing detailed design document "
+        "(e.g. https://gist.github.com/user/gist_id). "
+        "At least one of ep_url or design_doc_url must be provided.",
     ),
     cwd: str = Query(
         default="",
@@ -227,11 +304,17 @@ async def api_implement(
         "will be generated. Defaults to the current working directory.",
     ),
 ):
-    """Generate controller/reconciler code from an enhancement proposal (synchronous)."""
-    _validate_ep_url(ep_url)
+    """Generate controller/reconciler code from an enhancement proposal and/or design document.
+    
+    At least one input source (ep_url or design_doc_url) must be provided.
+    When both are provided, the design document takes precedence for implementation details.
+    """
+    _validate_inputs(ep_url, design_doc_url)
     working_dir = _resolve_working_dir(cwd)
 
-    result = await run_agent("api-implement", ep_url, working_dir)
+    result = await run_agent(
+        "api-implement", ep_url, working_dir, design_doc_url=design_doc_url
+    )
     if not result.success:
         raise HTTPException(
             status_code=500, detail=f"Agent execution failed: {result.error}"
@@ -240,6 +323,7 @@ async def api_implement(
     return {
         "status": "success",
         "ep_url": ep_url,
+        "design_doc_url": design_doc_url,
         "cwd": working_dir,
         "output": result.output,
         "cost_usd": result.cost_usd,

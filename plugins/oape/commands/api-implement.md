@@ -1,6 +1,6 @@
 ---
-description: Generate OpenShift controller/reconciler implementation code from an enhancement proposal PR, following controller-runtime and operator-sdk conventions
-argument-hint: <enhancement-pr-url>
+description: Generate OpenShift controller/reconciler implementation code from an enhancement proposal PR and/or design document, following controller-runtime and operator-sdk conventions
+argument-hint: <enhancement-pr-url> [--design-doc <gist-url>]
 ---
 
 ## Name
@@ -8,14 +8,27 @@ oape:api-implement
 
 ## Synopsis
 ```shell
+# Both EP and design document
+/oape:api-implement <https://github.com/openshift/enhancements/pull/NNNN> --design-doc <https://gist.github.com/user/gist_id>
+
+# EP only (original behavior)
 /oape:api-implement <https://github.com/openshift/enhancements/pull/NNNN>
+
+# Design document only
+/oape:api-implement --design-doc <https://gist.github.com/user/gist_id>
 ```
 
 ## Description
-The `oape:api-implement` command reads an OpenShift enhancement proposal PR, extracts the required implementation logic, and generates complete controller/reconciler code in the correct paths of the current OpenShift operator repository.
+The `oape:api-implement` command reads an OpenShift enhancement proposal PR and/or a design document (GitHub Gist), extracts the required implementation logic, and generates complete controller/reconciler code in the correct paths of the current OpenShift operator repository.
+
+**Input Sources:**
+- **Enhancement Proposal (EP)**: High-level requirements, constraints, and context from an openshift/enhancements PR
+- **Design Document (Gist)**: Detailed implementation specifications including reconciliation workflow, dependent resources, and controller behavior
+
+When both sources are provided, the design document takes precedence for implementation details while the EP provides high-level context.
 
 This command generates **production-ready code with zero TODOs** by:
-1. Parsing the enhancement proposal for explicit business logic requirements
+1. Parsing the input sources for explicit business logic requirements
 2. Detecting the operator framework in use (controller-runtime, operator-sdk, library-go)
 3. Generating actual reconciliation logic, not placeholders
 4. Creating dependent resource builders and reconcilers
@@ -32,29 +45,75 @@ This command generates **production-ready code with zero TODOs** by:
 
 All prechecks must pass before proceeding. If ANY precheck fails, STOP immediately and report the failure.
 
-#### Precheck 1 — Validate Enhancement PR URL
+#### Precheck 1 — Parse and Validate Input Arguments
 
-The provided argument MUST be a valid GitHub PR URL pointing to the `openshift/enhancements` repository.
+The command accepts an Enhancement Proposal URL and/or a design document (gist) URL. At least one must be provided.
 
 ```bash
-ENHANCEMENT_PR="$ARGUMENTS"
+ARGS="$ARGUMENTS"
+ENHANCEMENT_PR=""
+DESIGN_DOC_URL=""
+ENHANCEMENT_PR_NUMBER=""
 
-# Validate URL format
-if [ -z "$ENHANCEMENT_PR" ]; then
-  echo "PRECHECK FAILED: No enhancement PR URL provided."
-  echo "Usage: /oape:api-implement <https://github.com/openshift/enhancements/pull/NNNN>"
+# Extract --design-doc argument if present
+if echo "$ARGS" | grep -q '\-\-design-doc'; then
+  DESIGN_DOC_URL=$(echo "$ARGS" | sed -n 's/.*--design-doc[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+  # Remove --design-doc and its value from ARGS to get EP URL
+  ENHANCEMENT_PR=$(echo "$ARGS" | sed 's/--design-doc[[:space:]]\+[^[:space:]]\+//' | xargs)
+else
+  ENHANCEMENT_PR="$ARGS"
+fi
+
+# Validate at least one input is provided
+if [ -z "$ENHANCEMENT_PR" ] && [ -z "$DESIGN_DOC_URL" ]; then
+  echo "PRECHECK FAILED: No input provided."
+  echo "Usage:"
+  echo "  /oape:api-implement <EP_URL> [--design-doc <GIST_URL>]"
+  echo "  /oape:api-implement --design-doc <GIST_URL>"
+  echo ""
+  echo "Examples:"
+  echo "  /oape:api-implement https://github.com/openshift/enhancements/pull/1234"
+  echo "  /oape:api-implement https://github.com/openshift/enhancements/pull/1234 --design-doc https://gist.github.com/user/abc123"
+  echo "  /oape:api-implement --design-doc https://gist.github.com/user/abc123"
   exit 1
 fi
 
-if ! echo "$ENHANCEMENT_PR" | grep -qE '^https://github\.com/openshift/enhancements/pull/[0-9]+/?$'; then
-  echo "PRECHECK FAILED: Invalid enhancement PR URL."
-  echo "Expected format: https://github.com/openshift/enhancements/pull/<number>"
-  echo "Got: $ENHANCEMENT_PR"
-  exit 1
+# Validate Enhancement PR URL if provided
+if [ -n "$ENHANCEMENT_PR" ]; then
+  if ! echo "$ENHANCEMENT_PR" | grep -qE '^https://github\.com/openshift/enhancements/pull/[0-9]+/?$'; then
+    echo "PRECHECK FAILED: Invalid enhancement PR URL."
+    echo "Expected format: https://github.com/openshift/enhancements/pull/<number>"
+    echo "Got: $ENHANCEMENT_PR"
+    exit 1
+  fi
+  ENHANCEMENT_PR_NUMBER=$(echo "$ENHANCEMENT_PR" | grep -oE '[0-9]+$')
+  echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER validated."
+else
+  echo "No Enhancement PR provided. Using design document only."
 fi
 
-ENHANCEMENT_PR_NUMBER=$(echo "$ENHANCEMENT_PR" | grep -oE '[0-9]+$')
-echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER validated."
+# Validate Design Document URL if provided
+if [ -n "$DESIGN_DOC_URL" ]; then
+  # Support multiple gist URL formats:
+  # - https://gist.github.com/username/gist_id
+  # - https://gist.github.com/gist_id
+  # - https://gist.githubusercontent.com/username/gist_id/raw/...
+  if ! echo "$DESIGN_DOC_URL" | grep -qE '^https://gist\.github(usercontent)?\.com/'; then
+    echo "PRECHECK FAILED: Invalid design document URL."
+    echo "Expected format: https://gist.github.com/[username/]<gist_id>"
+    echo "Got: $DESIGN_DOC_URL"
+    exit 1
+  fi
+  echo "Design document URL validated: $DESIGN_DOC_URL"
+else
+  echo "No design document provided. Using Enhancement PR only."
+fi
+
+echo ""
+echo "=== Input Sources ==="
+[ -n "$ENHANCEMENT_PR" ] && echo "  Enhancement PR: $ENHANCEMENT_PR"
+[ -n "$DESIGN_DOC_URL" ] && echo "  Design Document: $DESIGN_DOC_URL"
+echo "====================="
 ```
 
 #### Precheck 2 — Verify Required Tools
@@ -123,26 +182,72 @@ GO_MODULE=$(head -1 "$REPO_ROOT/go.mod" | awk '{print $2}')
 echo "Go module: $GO_MODULE"
 ```
 
-#### Precheck 4 — Verify Enhancement PR is Accessible
+#### Precheck 4 — Verify Enhancement PR is Accessible (if provided)
 
 ```bash
-echo "Fetching enhancement PR #$ENHANCEMENT_PR_NUMBER details..."
+PR_TITLE=""
+PR_STATE=""
 
-PR_STATE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json state --jq '.state' 2>/dev/null)
+if [ -n "$ENHANCEMENT_PR_NUMBER" ]; then
+  echo "Fetching enhancement PR #$ENHANCEMENT_PR_NUMBER details..."
 
-if [ -z "$PR_STATE" ]; then
-  echo "PRECHECK FAILED: Unable to access enhancement PR #$ENHANCEMENT_PR_NUMBER."
-  echo "Ensure the PR exists and you have access to the openshift/enhancements repository."
-  exit 1
+  PR_STATE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json state --jq '.state' 2>/dev/null)
+
+  if [ -z "$PR_STATE" ]; then
+    echo "PRECHECK FAILED: Unable to access enhancement PR #$ENHANCEMENT_PR_NUMBER."
+    echo "Ensure the PR exists and you have access to the openshift/enhancements repository."
+    exit 1
+  fi
+
+  echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER state: $PR_STATE"
+
+  PR_TITLE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json title --jq '.title')
+  echo "Enhancement title: $PR_TITLE"
+else
+  echo "Skipping Enhancement PR validation (not provided)."
 fi
-
-echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER state: $PR_STATE"
-
-PR_TITLE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json title --jq '.title')
-echo "Enhancement title: $PR_TITLE"
 ```
 
-#### Precheck 5 — Verify API Types Exist
+#### Precheck 5 — Verify Design Document is Accessible (if provided)
+
+```bash
+GIST_ID=""
+
+if [ -n "$DESIGN_DOC_URL" ]; then
+  echo "Verifying design document accessibility..."
+
+  # Extract gist ID from URL (handles various formats)
+  GIST_ID=$(echo "$DESIGN_DOC_URL" | grep -oE '[a-f0-9]{32}' | head -1)
+  
+  if [ -z "$GIST_ID" ]; then
+    # Try extracting from end of URL for short gist IDs
+    GIST_ID=$(echo "$DESIGN_DOC_URL" | sed 's|.*/||' | sed 's|[?#].*||')
+  fi
+
+  if [ -z "$GIST_ID" ]; then
+    echo "PRECHECK FAILED: Could not extract gist ID from URL."
+    echo "URL: $DESIGN_DOC_URL"
+    exit 1
+  fi
+
+  # Verify gist is accessible
+  GIST_INFO=$(gh api "gists/$GIST_ID" --jq '.description // "Untitled"' 2>/dev/null)
+  
+  if [ -z "$GIST_INFO" ]; then
+    echo "PRECHECK FAILED: Unable to access design document gist."
+    echo "Gist ID: $GIST_ID"
+    echo "Ensure the gist exists and is public (or you have access)."
+    exit 1
+  fi
+
+  echo "Design document gist verified: $GIST_INFO"
+  echo "Gist ID: $GIST_ID"
+else
+  echo "Skipping design document validation (not provided)."
+fi
+```
+
+#### Precheck 6 — Verify API Types Exist
 
 ```bash
 echo "Checking if API types exist in the repository..."
@@ -160,7 +265,7 @@ echo "Found API types:"
 echo "$API_TYPES" | head -10
 ```
 
-#### Precheck 6 — Verify Clean Working Tree (Warning)
+#### Precheck 7 — Verify Clean Working Tree (Warning)
 
 ```bash
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -288,13 +393,17 @@ I will apply the correct patterns based on detected type.
 
 ---
 
-### Phase 3: Fetch and Parse Enhancement Proposal
+### Phase 3: Fetch and Parse Input Sources
 
-Read all changed/added files in the enhancement PR:
+Fetch content from all provided input sources (Enhancement Proposal and/or Design Document).
+
+#### 3.1 Fetch Enhancement Proposal (if provided)
 
 ```bash
-echo "Fetching files changed in enhancement PR #$ENHANCEMENT_PR_NUMBER..."
-gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json files --jq '.files[].path'
+if [ -n "$ENHANCEMENT_PR_NUMBER" ]; then
+  echo "Fetching files changed in enhancement PR #$ENHANCEMENT_PR_NUMBER..."
+  gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json files --jq '.files[].path'
+fi
 ```
 
 Fetch the full content of each proposal file:
@@ -314,10 +423,43 @@ curl -sL "https://raw.githubusercontent.com/openshift/enhancements/refs/pull/$EN
 gh pr diff "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements
 ```
 
-#### 3.1 Extract Structured Requirements
+#### 3.2 Fetch Design Document (if provided)
+
+```bash
+if [ -n "$GIST_ID" ]; then
+  echo "Fetching design document from gist $GIST_ID..."
+  
+  # Fetch all files from the gist
+  gh api "gists/$GIST_ID" --jq '.files | to_entries[] | "=== FILE: \(.key) ===\n\(.value.content)\n"'
+fi
+```
+
+If the `gh api` command fails, try fetching via curl:
+
+```bash
+curl -sL "https://api.github.com/gists/$GIST_ID" | jq -r '.files | to_entries[] | "=== FILE: \(.key) ===\n\(.value.content)\n"'
+```
+
+#### 3.3 Extract Structured Requirements
 
 ```thinking
-I MUST extract the following structured information from the enhancement proposal. For each item, I will search for specific sections, keywords, and patterns.
+I MUST extract structured information from the input source(s). The approach depends on what was provided:
+
+**If BOTH Enhancement Proposal AND Design Document are provided:**
+- The EP provides high-level context: motivation, constraints, affected components
+- The Design Document provides implementation details: reconciliation workflow, dependent resources, controller behavior
+- When both specify the same information, the Design Document takes precedence
+- Extract from EP: component context, FeatureGate requirements, general constraints
+- Extract from Design Document: exact reconciliation steps, dependent resources, status updates, events
+
+**If only Enhancement Proposal is provided:**
+- Extract all requirements from the EP (original behavior)
+
+**If only Design Document is provided:**
+- The Design Document must be comprehensive enough to generate controller code
+- It should specify: API details, reconciliation workflow, dependent resources, status conditions
+
+From the combined sources, I will extract the following. For each item, I will search for specific sections, keywords, and patterns.
 
 ## EXTRACTION CHECKLIST
 
@@ -432,7 +574,14 @@ Based on all above, compute:
 - [ ] External resources watched: get, list, watch
 - [ ] Events: create, patch
 
-If ANY required section (A, B, C, F, I) is missing or ambiguous, I MUST stop and ask the user for clarification. I will NOT guess.
+**Source Merging Rules:**
+When both EP and Design Document are provided:
+1. Design Document takes precedence for implementation-specific details
+2. EP provides context and constraints
+3. If there are conflicts, prefer Design Document specifics
+4. Document any significant conflicts in the output summary
+
+If ANY required section (A, B, C, F, I) is missing or ambiguous across ALL provided sources, I MUST stop and ask the user for clarification. I will NOT guess.
 ```
 
 ---
@@ -1133,8 +1282,10 @@ After generating all files, provide a comprehensive summary:
 ```text
 === Controller Implementation Summary ===
 
-Enhancement PR: <url>
-Enhancement Title: <title>
+Input Sources:
+  Enhancement PR: <url> (if provided)
+  Design Document: <gist-url> (if provided)
+  Enhancement Title: <title> (if EP provided)
 Operator Type: <controller-runtime | library-go>
 
 Generated Files:
@@ -1193,6 +1344,9 @@ Cleanup on Deletion:
 
 Feature Gate: <FeatureGateName> (if applicable)
 
+Source Conflicts Resolved: (if both EP and design doc provided)
+  - <item>: Used design doc specification (<reason>)
+
 Next Steps:
   1. Review the generated controller code
   2. Run 'make generate' to update generated code
@@ -1208,34 +1362,83 @@ Next Steps:
 
 The command MUST FAIL and STOP immediately if ANY of the following are true:
 
-1. **Invalid PR URL**: Not a valid `openshift/enhancements` PR
-2. **Missing tools**: `gh`, `go`, `git`, or `make` not installed
-3. **Not authenticated**: `gh` not authenticated
-4. **Not an operator repo**: No go.mod or not a recognized operator type
-5. **No API types**: API types don't exist (run `/oape:api-generate` first)
-6. **PR not accessible**: Enhancement PR cannot be fetched
-7. **No implementation requirements**: EP doesn't describe controller behavior
-8. **Ambiguous requirements**: Cannot determine reconciliation workflow
-9. **Unsupported framework**: Repository does not use controller-runtime or library-go
+1. **No input provided**: Neither an enhancement PR URL nor a design document URL was provided
+2. **Invalid PR URL**: The provided EP URL is not a valid `openshift/enhancements` PR
+3. **Invalid gist URL**: The provided design document URL is not a valid GitHub Gist
+4. **Missing tools**: `gh`, `go`, `git`, or `make` not installed
+5. **Not authenticated**: `gh` not authenticated
+6. **Not an operator repo**: No go.mod or not a recognized operator type
+7. **No API types**: API types don't exist (run `/oape:api-generate` first)
+8. **Input not accessible**: Enhancement PR or design document cannot be fetched
+9. **No implementation requirements**: Input sources don't describe controller behavior
+10. **Ambiguous requirements**: Cannot determine reconciliation workflow from input sources
+11. **Unsupported framework**: Repository does not use controller-runtime or library-go
 
 ## Behavioral Rules
 
-1. **Never guess**: If EP is ambiguous, STOP and ask the user for clarification
-2. **Zero TODOs**: Generate actual implementation code, not placeholders
-3. **Convention over proposal**: Apply framework best practices even if EP differs
-4. **Match existing patterns**: Replicate patterns from existing controllers in the repo
-5. **Idempotent reconciliation**: Generated Reconcile() must be idempotent
-6. **Minimal changes**: Only generate what the enhancement requires
-7. **Surgical edits**: Preserve unrelated code when modifying files
-8. **Status-first**: Always use Status().Update() for status changes
-9. **Finalizer safety**: Add before external resources, remove after cleanup
-10. **Event recording**: Record events for user-visible state changes
+1. **Never guess**: If input sources are ambiguous, STOP and ask the user for clarification
+2. **Design document precedence**: When both EP and design document are provided, the design document takes precedence for implementation details
+3. **Zero TODOs**: Generate actual implementation code, not placeholders
+4. **Convention over proposal**: Apply framework best practices even if input sources differ
+5. **Match existing patterns**: Replicate patterns from existing controllers in the repo
+6. **Idempotent reconciliation**: Generated Reconcile() must be idempotent
+7. **Minimal changes**: Only generate what the input sources require
+8. **Surgical edits**: Preserve unrelated code when modifying files
+9. **Status-first**: Always use Status().Update() for status changes
+10. **Finalizer safety**: Add before external resources, remove after cleanup
+11. **Event recording**: Record events for user-visible state changes
 
 ## Arguments
 
-- `<enhancement-pr-url>`: GitHub PR URL to the OpenShift enhancement proposal
+- `<enhancement-pr-url>` (optional if design-doc provided): GitHub PR URL to the OpenShift enhancement proposal
   - Format: `https://github.com/openshift/enhancements/pull/<number>`
-  - Required argument
+
+- `--design-doc <gist-url>` (optional if EP provided): GitHub Gist URL containing detailed implementation specifications
+  - Supported formats:
+    - `https://gist.github.com/username/gist_id`
+    - `https://gist.github.com/gist_id`
+    - `https://gist.githubusercontent.com/username/gist_id/raw/...`
+
+**At least one input source (EP or design document) must be provided.**
+
+## Design Document Expected Format
+
+When using a design document for controller implementation, it should contain:
+
+```markdown
+# Design Document: Feature Name
+
+## API Specification
+- Group: config.openshift.io
+- Version: v1
+- Kind: FeatureName
+
+## Reconciliation Workflow
+1. Validate spec
+2. Create/update ConfigMap with configuration
+3. Deploy application Deployment
+4. Expose via Service
+5. Update status with observed state
+
+## Dependent Resources
+- ConfigMap: <name>-config — stores configuration
+- Deployment: <name>-deployment — runs the workload
+- Service: <name>-service — exposes the workload
+
+## Status Conditions
+- Available: true when Deployment is ready
+- Progressing: true during reconciliation
+- Degraded: true on errors
+
+## Events
+- ReconcileComplete: successful reconciliation
+- ReconcileFailed: reconciliation error
+- Created/Updated: resource lifecycle events
+
+## Cleanup
+- External resources: describe what to clean up
+- Finalizer: <group>.<resource>-finalizer
+```
 
 ## Prerequisites
 

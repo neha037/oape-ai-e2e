@@ -59,14 +59,16 @@ async def run_agent(
     command: str,
     ep_url: str,
     working_dir: str,
+    design_doc_url: str = "",
     on_message: Callable[[dict], None] | None = None,
 ) -> AgentResult:
     """Run the Claude agent and return the result.
 
     Args:
         command: The command key (e.g. "api-implement").
-        ep_url: The enhancement proposal PR URL.
+        ep_url: The enhancement proposal PR URL (optional if design_doc_url provided).
         working_dir: Absolute path to the operator repo.
+        design_doc_url: Optional GitHub Gist URL containing design document.
         on_message: Optional callback invoked with each conversation message
             dict as it arrives, enabling real-time streaming.
 
@@ -82,10 +84,18 @@ async def run_agent(
             f"Supported: {', '.join(SUPPORTED_COMMANDS)}",
         )
 
+    # Build system prompt based on inputs provided
+    input_description = []
+    if ep_url:
+        input_description.append("enhancement proposal PR URL")
+    if design_doc_url:
+        input_description.append("design document (gist)")
+    inputs_str = " and ".join(input_description) if input_description else "input"
+
     options = ClaudeAgentOptions(
         system_prompt=(
             "You are an OpenShift operator code generation assistant. "
-            f"Execute the {skill_name} plugin with the provided EP URL. "
+            f"Execute the {skill_name} plugin with the provided {inputs_str}. "
         ),
         cwd=working_dir,
         permission_mode="bypassPermissions",
@@ -93,13 +103,21 @@ async def run_agent(
         plugins=[{"type": "local", "path": PLUGIN_DIR}],
     )
 
+    # Build the prompt with optional --design-doc argument
+    prompt_parts = [f"/{skill_name}"]
+    if ep_url:
+        prompt_parts.append(ep_url)
+    if design_doc_url:
+        prompt_parts.append(f"--design-doc {design_doc_url}")
+    prompt = " ".join(prompt_parts)
+
     output_parts: list[str] = []
     conversation: list[dict] = []
     cost_usd = 0.0
 
     conv_logger.info(
         f"\n{'=' * 60}\n[request] command={command}  ep_url={ep_url}  "
-        f"cwd={working_dir}\n{'=' * 60}"
+        f"design_doc_url={design_doc_url}  cwd={working_dir}\n{'=' * 60}"
     )
 
     def _emit(entry: dict) -> None:
@@ -110,7 +128,7 @@ async def run_agent(
 
     try:
         async for message in query(
-            prompt=f"/{skill_name} {ep_url}",
+            prompt=prompt,
             options=options,
         ):
             if isinstance(message, AssistantMessage):

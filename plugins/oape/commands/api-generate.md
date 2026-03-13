@@ -1,6 +1,6 @@
 ---
-description: Generate OpenShift API type definitions from an enhancement proposal PR, following OpenShift and Kubernetes API conventions
-argument-hint: <enhancement-pr-url>
+description: Generate OpenShift API type definitions from an enhancement proposal PR and/or design document, following OpenShift and Kubernetes API conventions
+argument-hint: <enhancement-pr-url> [--design-doc <gist-url>]
 ---
 
 ## Name
@@ -8,13 +8,26 @@ oape:api-generate
 
 ## Synopsis
 ```shell
+# Both EP and design document
+/oape:api-generate <https://github.com/openshift/enhancements/pull/NNNN> --design-doc <https://gist.github.com/user/gist_id>
+
+# EP only (original behavior)
 /oape:api-generate <https://github.com/openshift/enhancements/pull/NNNN>
+
+# Design document only
+/oape:api-generate --design-doc <https://gist.github.com/user/gist_id>
 ```
 
 ## Description
-The `oape:api-generate` command reads an OpenShift enhancement proposal PR, extracts the required API changes, and generates compliant Go type definitions in the correct paths of the current OpenShift operator repository.
+The `oape:api-generate` command reads an OpenShift enhancement proposal PR and/or a design document (GitHub Gist), extracts the required API changes, and generates compliant Go type definitions in the correct paths of the current OpenShift operator repository.
 
-It refreshes its knowledge of API conventions from the authoritative sources on every run, analyzes the enhancement proposal, and generates or modifies Go types that strictly follow both OpenShift and Kubernetes API conventions.
+**Input Sources:**
+- **Enhancement Proposal (EP)**: High-level requirements, constraints, and context from an openshift/enhancements PR
+- **Design Document (Gist)**: Detailed implementation specifications including exact field definitions, validation rules, and code structure
+
+When both sources are provided, the design document takes precedence for implementation details while the EP provides high-level context.
+
+It refreshes its knowledge of API conventions from the authoritative sources on every run, analyzes the input sources, and generates or modifies Go types that strictly follow both OpenShift and Kubernetes API conventions.
 
 **You MUST follow ALL conventions strictly. If any precheck fails, you MUST stop immediately and report the failure.**
 
@@ -24,29 +37,75 @@ It refreshes its knowledge of API conventions from the authoritative sources on 
 
 All prechecks must pass before proceeding. If ANY precheck fails, STOP immediately and report the failure.
 
-#### Precheck 1 — Validate Enhancement PR URL
+#### Precheck 1 — Parse and Validate Input Arguments
 
-The provided argument MUST be a valid GitHub PR URL pointing to the `openshift/enhancements` repository.
+The command accepts an Enhancement Proposal URL and/or a design document (gist) URL. At least one must be provided.
 
 ```bash
-ENHANCEMENT_PR="$ARGUMENTS"
+ARGS="$ARGUMENTS"
+ENHANCEMENT_PR=""
+DESIGN_DOC_URL=""
+ENHANCEMENT_PR_NUMBER=""
 
-# Validate URL format
-if [ -z "$ENHANCEMENT_PR" ]; then
-  echo "PRECHECK FAILED: No enhancement PR URL provided."
-  echo "Usage: /oape:api-generate <https://github.com/openshift/enhancements/pull/NNNN>"
+# Extract --design-doc argument if present
+if echo "$ARGS" | grep -q '\-\-design-doc'; then
+  DESIGN_DOC_URL=$(echo "$ARGS" | sed -n 's/.*--design-doc[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+  # Remove --design-doc and its value from ARGS to get EP URL
+  ENHANCEMENT_PR=$(echo "$ARGS" | sed 's/--design-doc[[:space:]]\+[^[:space:]]\+//' | xargs)
+else
+  ENHANCEMENT_PR="$ARGS"
+fi
+
+# Validate at least one input is provided
+if [ -z "$ENHANCEMENT_PR" ] && [ -z "$DESIGN_DOC_URL" ]; then
+  echo "PRECHECK FAILED: No input provided."
+  echo "Usage:"
+  echo "  /oape:api-generate <EP_URL> [--design-doc <GIST_URL>]"
+  echo "  /oape:api-generate --design-doc <GIST_URL>"
+  echo ""
+  echo "Examples:"
+  echo "  /oape:api-generate https://github.com/openshift/enhancements/pull/1234"
+  echo "  /oape:api-generate https://github.com/openshift/enhancements/pull/1234 --design-doc https://gist.github.com/user/abc123"
+  echo "  /oape:api-generate --design-doc https://gist.github.com/user/abc123"
   exit 1
 fi
 
-if ! echo "$ENHANCEMENT_PR" | grep -qE '^https://github\.com/openshift/enhancements/pull/[0-9]+/?$'; then
-  echo "PRECHECK FAILED: Invalid enhancement PR URL."
-  echo "Expected format: https://github.com/openshift/enhancements/pull/<number>"
-  echo "Got: $ENHANCEMENT_PR"
-  exit 1
+# Validate Enhancement PR URL if provided
+if [ -n "$ENHANCEMENT_PR" ]; then
+  if ! echo "$ENHANCEMENT_PR" | grep -qE '^https://github\.com/openshift/enhancements/pull/[0-9]+/?$'; then
+    echo "PRECHECK FAILED: Invalid enhancement PR URL."
+    echo "Expected format: https://github.com/openshift/enhancements/pull/<number>"
+    echo "Got: $ENHANCEMENT_PR"
+    exit 1
+  fi
+  ENHANCEMENT_PR_NUMBER=$(echo "$ENHANCEMENT_PR" | grep -oE '[0-9]+$')
+  echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER validated."
+else
+  echo "No Enhancement PR provided. Using design document only."
 fi
 
-ENHANCEMENT_PR_NUMBER=$(echo "$ENHANCEMENT_PR" | grep -oE '[0-9]+$')
-echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER validated."
+# Validate Design Document URL if provided
+if [ -n "$DESIGN_DOC_URL" ]; then
+  # Support multiple gist URL formats:
+  # - https://gist.github.com/username/gist_id
+  # - https://gist.github.com/gist_id
+  # - https://gist.githubusercontent.com/username/gist_id/raw/...
+  if ! echo "$DESIGN_DOC_URL" | grep -qE '^https://gist\.github(usercontent)?\.com/'; then
+    echo "PRECHECK FAILED: Invalid design document URL."
+    echo "Expected format: https://gist.github.com/[username/]<gist_id>"
+    echo "Got: $DESIGN_DOC_URL"
+    exit 1
+  fi
+  echo "Design document URL validated: $DESIGN_DOC_URL"
+else
+  echo "No design document provided. Using Enhancement PR only."
+fi
+
+echo ""
+echo "=== Input Sources ==="
+[ -n "$ENHANCEMENT_PR" ] && echo "  Enhancement PR: $ENHANCEMENT_PR"
+[ -n "$DESIGN_DOC_URL" ] && echo "  Design Document: $DESIGN_DOC_URL"
+echo "====================="
 ```
 
 #### Precheck 2 — Verify Required Tools
@@ -122,27 +181,71 @@ else
 fi
 ```
 
-#### Precheck 4 — Verify Enhancement PR is Accessible
+#### Precheck 4 — Verify Enhancement PR is Accessible (if provided)
 
 ```bash
-echo "Fetching enhancement PR #$ENHANCEMENT_PR_NUMBER details..."
+PR_TITLE=""
+PR_STATE=""
 
-PR_STATE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json state --jq '.state' 2>/dev/null)
+if [ -n "$ENHANCEMENT_PR_NUMBER" ]; then
+  echo "Fetching enhancement PR #$ENHANCEMENT_PR_NUMBER details..."
 
-if [ -z "$PR_STATE" ]; then
-  echo "PRECHECK FAILED: Unable to access enhancement PR #$ENHANCEMENT_PR_NUMBER."
-  echo "Ensure the PR exists and you have access to the openshift/enhancements repository."
-  exit 1
+  PR_STATE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json state --jq '.state' 2>/dev/null)
+
+  if [ -z "$PR_STATE" ]; then
+    echo "PRECHECK FAILED: Unable to access enhancement PR #$ENHANCEMENT_PR_NUMBER."
+    echo "Ensure the PR exists and you have access to the openshift/enhancements repository."
+    exit 1
+  fi
+
+  echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER state: $PR_STATE"
+
+  # Get the PR title and body for context
+  PR_TITLE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json title --jq '.title')
+  echo "Enhancement title: $PR_TITLE"
+else
+  echo "Skipping Enhancement PR validation (not provided)."
 fi
-
-echo "Enhancement PR #$ENHANCEMENT_PR_NUMBER state: $PR_STATE"
-
-# Get the PR title and body for context
-PR_TITLE=$(gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json title --jq '.title')
-echo "Enhancement title: $PR_TITLE"
 ```
 
-#### Precheck 5 — Verify Clean Working Tree (Warning)
+#### Precheck 5 — Verify Design Document is Accessible (if provided)
+
+```bash
+if [ -n "$DESIGN_DOC_URL" ]; then
+  echo "Verifying design document accessibility..."
+
+  # Extract gist ID from URL (handles various formats)
+  GIST_ID=$(echo "$DESIGN_DOC_URL" | grep -oE '[a-f0-9]{32}' | head -1)
+  
+  if [ -z "$GIST_ID" ]; then
+    # Try extracting from end of URL for short gist IDs
+    GIST_ID=$(echo "$DESIGN_DOC_URL" | sed 's|.*/||' | sed 's|[?#].*||')
+  fi
+
+  if [ -z "$GIST_ID" ]; then
+    echo "PRECHECK FAILED: Could not extract gist ID from URL."
+    echo "URL: $DESIGN_DOC_URL"
+    exit 1
+  fi
+
+  # Verify gist is accessible
+  GIST_INFO=$(gh api "gists/$GIST_ID" --jq '.description // "Untitled"' 2>/dev/null)
+  
+  if [ -z "$GIST_INFO" ]; then
+    echo "PRECHECK FAILED: Unable to access design document gist."
+    echo "Gist ID: $GIST_ID"
+    echo "Ensure the gist exists and is public (or you have access)."
+    exit 1
+  fi
+
+  echo "Design document gist verified: $GIST_INFO"
+  echo "Gist ID: $GIST_ID"
+else
+  echo "Skipping design document validation (not provided)."
+fi
+```
+
+#### Precheck 6 — Verify Clean Working Tree (Warning)
 
 ```bash
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -178,33 +281,17 @@ freshly fetched versions take precedence. I will carry all extracted rules forwa
 generation steps.
 ```
 
-### Phase 2: Fetch and Analyze the Enhancement Proposal
+### Phase 2: Fetch and Analyze Input Sources
 
-Read all changed/added files in the enhancement PR to find the proposal document:
+Fetch content from all provided input sources (Enhancement Proposal and/or Design Document).
+
+#### 2.1 Fetch Enhancement Proposal (if provided)
 
 ```bash
-# Get the list of files changed in the PR
-echo "Fetching files changed in enhancement PR #$ENHANCEMENT_PR_NUMBER..."
-gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json files --jq '.files[].path'
-```
-
-```thinking
-I need to:
-1. Identify the enhancement proposal markdown file(s) — typically under enhancements/<area>/<proposal-name>.md
-2. Read the full content of the proposal
-3. Extract the following critical information:
-   a. Which OpenShift operator/component is being modified
-   b. The API group and version (e.g., config.openshift.io/v1, operator.openshift.io/v1)
-   c. Whether this is a NEW CRD or modifications to an EXISTING CRD
-   d. Whether this is a Configuration API or Workload API
-   e. The specific fields/types being added or modified
-   f. Validation requirements (enums, patterns, min/max, cross-field)
-   g. Whether fields should be TechPreview-gated
-   h. Any discriminated unions
-   i. Defaulting behavior
-   j. Immutability requirements
-   k. Status fields and conditions
-   l. The FeatureGate name to use
+if [ -n "$ENHANCEMENT_PR_NUMBER" ]; then
+  echo "Fetching files changed in enhancement PR #$ENHANCEMENT_PR_NUMBER..."
+  gh pr view "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements --json files --jq '.files[].path'
+fi
 ```
 
 Fetch the full content of each proposal file. Use the PR ref (`refs/pull/<number>/head`) which
@@ -225,6 +312,62 @@ As a last resort, fall back to reading the diff which contains the full proposed
 
 ```bash
 gh pr diff "$ENHANCEMENT_PR_NUMBER" --repo openshift/enhancements
+```
+
+#### 2.2 Fetch Design Document (if provided)
+
+```bash
+if [ -n "$GIST_ID" ]; then
+  echo "Fetching design document from gist $GIST_ID..."
+  
+  # Fetch all files from the gist
+  gh api "gists/$GIST_ID" --jq '.files | to_entries[] | "=== FILE: \(.key) ===\n\(.value.content)\n"'
+fi
+```
+
+If the `gh api` command fails, try fetching via curl:
+
+```bash
+curl -sL "https://api.github.com/gists/$GIST_ID" | jq -r '.files | to_entries[] | "=== FILE: \(.key) ===\n\(.value.content)\n"'
+```
+
+#### 2.3 Analyze and Merge Requirements
+
+```thinking
+I need to analyze the input source(s) and extract API requirements. The approach depends on what was provided:
+
+**If BOTH Enhancement Proposal AND Design Document are provided:**
+- The EP provides high-level context: motivation, constraints, affected components
+- The Design Document provides implementation details: exact field definitions, types, validation
+- When both specify the same information, the Design Document takes precedence
+- Extract from EP: operator/component context, FeatureGate requirements, general constraints
+- Extract from Design Document: exact API fields, types, validation rules, code structure
+
+**If only Enhancement Proposal is provided:**
+- Extract all requirements from the EP (original behavior)
+
+**If only Design Document is provided:**
+- The Design Document must be comprehensive enough to generate API types
+- It should specify: API group, version, kind, all fields with types and validation
+
+From the combined sources, I must extract:
+   a. Which OpenShift operator/component is being modified
+   b. The API group and version (e.g., config.openshift.io/v1, operator.openshift.io/v1)
+   c. Whether this is a NEW CRD or modifications to an EXISTING CRD
+   d. Whether this is a Configuration API or Workload API
+   e. The specific fields/types being added or modified
+   f. Validation requirements (enums, patterns, min/max, cross-field)
+   g. Whether fields should be TechPreview-gated
+   h. Any discriminated unions
+   i. Defaulting behavior
+   j. Immutability requirements
+   k. Status fields and conditions
+   l. The FeatureGate name to use
+
+If there are conflicts between sources, I will:
+1. Prefer Design Document specifics over EP generalizations
+2. Document any conflicts in my analysis
+3. Ask the user for clarification if conflicts are ambiguous
 ```
 
 ### Phase 3: Identify Target API Paths in Current Repository
@@ -341,8 +484,10 @@ After generating all files, provide a summary:
 ```text
 === API Generation Summary ===
 
-Enhancement PR: <url>
-Enhancement Title: <title>
+Input Sources:
+  Enhancement PR: <url> (if provided)
+  Design Document: <gist-url> (if provided)
+  Enhancement Title: <title> (if EP provided)
 
 Generated/Modified Files:
   - <path/to/types_resource.go> — <description of changes>
@@ -367,6 +512,9 @@ Modified Fields/Types:
 Validation Rules:
   - <field>: <rule description>
 
+Source Conflicts Resolved: (if both EP and design doc provided)
+  - <field>: Used design doc specification (<reason>)
+
 Next Steps:
   1. Review the generated code for correctness
   2. Run 'make update' to regenerate CRDs and deep copy functions
@@ -381,12 +529,14 @@ Next Steps:
 
 The command MUST FAIL and STOP immediately if ANY of the following are true:
 
-1. **Invalid PR URL**: The provided URL is not a valid `openshift/enhancements` PR
-2. **Missing tools**: `gh`, `go`, or `git` are not installed or `gh` is not authenticated
-3. **Not an operator repo**: The current directory is not a Git repository with a Go module that references `openshift/api`
-4. **PR not accessible**: The enhancement PR cannot be fetched (permissions, doesn't exist, etc.)
-5. **No API changes found**: The enhancement proposal does not describe any API changes
-6. **Ambiguous API target**: Cannot determine the target API group, version, or kind from the proposal.
+1. **No input provided**: Neither an enhancement PR URL nor a design document URL was provided
+2. **Invalid PR URL**: The provided EP URL is not a valid `openshift/enhancements` PR
+3. **Invalid gist URL**: The provided design document URL is not a valid GitHub Gist
+4. **Missing tools**: `gh`, `go`, or `git` are not installed or `gh` is not authenticated
+5. **Not an operator repo**: The current directory is not a Git repository with a Go module that references `openshift/api`
+6. **Input not accessible**: The enhancement PR or design document cannot be fetched (permissions, doesn't exist, etc.)
+7. **No API changes found**: The input source(s) do not describe any API changes
+8. **Ambiguous API target**: Cannot determine the target API group, version, or kind from the input sources
 
 When failing, provide a clear error message explaining:
 - Which precheck failed
@@ -395,18 +545,54 @@ When failing, provide a clear error message explaining:
 
 ## Behavioral Rules
 
-1. **Never guess**: If the enhancement proposal is ambiguous about API details, STOP and ask the user for clarification rather than guessing.
-2. **Convention over proposal**: If the enhancement proposal suggests an API design that violates conventions (e.g., using a Boolean), generate the convention-compliant alternative and document the deviation.
-3. **TechPreview when specified**: If the enhancement proposal indicates TechPreview gating, generate the appropriate FeatureGate markers. Follow whatever the proposal specifies regarding API maturity level.
-4. **Idempotent**: Running this command multiple times with the same PR should produce the same result (though it should warn if files already exist).
-5. **Minimal changes**: Only generate what the enhancement proposes. Do not add extra fields, types, or features not described in the proposal.
-6. **Surgical edits**: When modifying existing files, only change what the enhancement proposal requires. Preserve all unrelated code, comments, and formatting. For modifications to existing fields, clearly document what changed and why in the output summary.
+1. **Never guess**: If the input sources are ambiguous about API details, STOP and ask the user for clarification rather than guessing.
+2. **Design document precedence**: When both EP and design document are provided, the design document takes precedence for implementation details.
+3. **Convention over proposal**: If the input sources suggest an API design that violates conventions (e.g., using a Boolean), generate the convention-compliant alternative and document the deviation.
+4. **TechPreview when specified**: If the input sources indicate TechPreview gating, generate the appropriate FeatureGate markers. Follow whatever is specified regarding API maturity level.
+5. **Idempotent**: Running this command multiple times with the same inputs should produce the same result (though it should warn if files already exist).
+6. **Minimal changes**: Only generate what the input sources specify. Do not add extra fields, types, or features not described.
+7. **Surgical edits**: When modifying existing files, only change what the input sources require. Preserve all unrelated code, comments, and formatting. For modifications to existing fields, clearly document what changed and why in the output summary.
 
 ## Arguments
 
-- `<enhancement-pr-url>`: GitHub PR URL to the OpenShift enhancement proposal
+- `<enhancement-pr-url>` (optional if design-doc provided): GitHub PR URL to the OpenShift enhancement proposal
   - Format: `https://github.com/openshift/enhancements/pull/<number>`
-  - Required argument
+
+- `--design-doc <gist-url>` (optional if EP provided): GitHub Gist URL containing detailed API specifications
+  - Supported formats:
+    - `https://gist.github.com/username/gist_id`
+    - `https://gist.github.com/gist_id`
+    - `https://gist.githubusercontent.com/username/gist_id/raw/...`
+
+**At least one input source (EP or design document) must be provided.**
+
+## Design Document Expected Format
+
+When using a design document, it should contain structured implementation details:
+
+```markdown
+# Design Document: Feature Name
+
+## API Specification
+- Group: config.openshift.io (or operator.openshift.io, etc.)
+- Version: v1 (or v1alpha1, v1beta1)
+- Kind: FeatureName
+- Scope: Cluster (or Namespaced)
+
+## Spec Fields
+- `fieldName` (type): Description
+  - Validation: required, enum values, min/max, pattern
+  - Default: default value if any
+  - Immutable: yes/no
+
+## Status Fields
+- `conditions`: Standard OpenShift conditions
+- `observedGeneration`: int64
+
+## FeatureGate
+- Name: FeatureGateName
+- Stage: TechPreviewNoUpgrade / Default
+```
 
 ## Prerequisites
 
@@ -419,9 +605,10 @@ When failing, provide a clear error message explaining:
 
 - **Success**: API type definitions generated/modified with a summary of all changes
 - **Failure Scenarios**:
-  - Invalid or missing enhancement PR URL
+  - No input provided (neither EP nor design document)
+  - Invalid enhancement PR URL or gist URL
   - Missing required tools or unauthenticated GitHub CLI
   - Not inside a valid OpenShift operator repository
-  - Enhancement PR inaccessible
-  - No API changes found in the proposal
+  - Input source(s) inaccessible
+  - No API changes found in the input sources
   - Ambiguous API target (asks for clarification instead of guessing)

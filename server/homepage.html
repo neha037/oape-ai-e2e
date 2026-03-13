@@ -53,16 +53,22 @@
 <body>
 <div class="card">
   <h1>OAPE Operator Feature Developer</h1>
-  <p class="sub">Generate controller code from an OpenShift Enhancement Proposal</p>
+  <p class="sub">Generate controller code from an Enhancement Proposal and/or Design Document</p>
   <form id="epForm">
     <label for="command">Command</label>
     <select id="command" name="command">
       <option value="api-implement" selected>api-implement</option>
       <option value="analyze-rfe">analyze-rfe</option>
     </select>
-    <label for="ep_url" id="ep_url_label" style="margin-top:14px">Enhancement Proposal PR URL</label>
+    <label for="ep_url" id="ep_url_label" style="margin-top:14px">Enhancement Proposal PR URL <span style="color:#999">(optional if design doc provided)</span></label>
     <input type="text" id="ep_url" name="ep_url"
-           placeholder="https://github.com/openshift/enhancements/pull/1234" required>
+           placeholder="https://github.com/openshift/enhancements/pull/1234">
+    <label for="design_doc_url" id="design_doc_label" style="margin-top:14px">Design Document (Gist) URL <span style="color:#999">(optional if EP provided)</span></label>
+    <input type="text" id="design_doc_url" name="design_doc_url"
+           placeholder="https://gist.github.com/username/gist_id">
+    <p id="input_hint" style="margin-top:8px; font-size:.8rem; color:#666">
+      At least one of EP URL or Design Document is required. When both are provided, the design document takes precedence for implementation details.
+    </p>
     <label for="cwd" style="margin-top:14px">Working Directory <span style="color:#999">(optional)</span></label>
     <input type="text" id="cwd" name="cwd" placeholder="/path/to/operator-repo">
     <button type="submit" id="submitBtn">Generate</button>
@@ -79,15 +85,26 @@ const convEl   = document.getElementById('conversation');
 const outputEl = document.getElementById('output');
 const epUrlLabel = document.getElementById('ep_url_label');
 const epUrlInput = document.getElementById('ep_url');
+const designDocLabel = document.getElementById('design_doc_label');
+const designDocInput = document.getElementById('design_doc_url');
+const designDocRow = designDocLabel.parentElement;
 
 function updateInputLabel() {
   const command = document.getElementById('command').value;
+  const inputHint = document.getElementById('input_hint');
   if (command === 'analyze-rfe') {
-    epUrlLabel.textContent = 'RFE key or Jira URL';
+    epUrlLabel.innerHTML = 'RFE key or Jira URL';
     epUrlInput.placeholder = 'RFE-7841 or https://issues.redhat.com/browse/RFE-7841';
+    designDocLabel.style.display = 'none';
+    designDocInput.style.display = 'none';
+    designDocInput.value = '';
+    inputHint.style.display = 'none';
   } else {
-    epUrlLabel.textContent = 'Enhancement Proposal PR URL';
+    epUrlLabel.innerHTML = 'Enhancement Proposal PR URL <span style="color:#999">(optional if design doc provided)</span>';
     epUrlInput.placeholder = 'https://github.com/openshift/enhancements/pull/1234';
+    designDocLabel.style.display = 'block';
+    designDocInput.style.display = 'block';
+    inputHint.style.display = 'block';
   }
 }
 document.getElementById('command').addEventListener('change', updateInputLabel);
@@ -106,9 +123,22 @@ function truncate(str, maxLen) {
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const epUrl   = document.getElementById('ep_url').value.trim();
+  const designDocUrl = document.getElementById('design_doc_url').value.trim();
   const cwd     = document.getElementById('cwd').value.trim();
   const command = document.getElementById('command').value;
-  if (!epUrl) return;
+  
+  // Validate: for analyze-rfe, EP is required; for others, at least one of EP or design doc
+  if (command === 'analyze-rfe') {
+    if (!epUrl) {
+      statusEl.innerHTML = '<span class="error">RFE key or Jira URL is required</span>';
+      return;
+    }
+  } else {
+    if (!epUrl && !designDocUrl) {
+      statusEl.innerHTML = '<span class="error">At least one of EP URL or Design Document URL is required</span>';
+      return;
+    }
+  }
 
   btn.disabled = true;
   outputEl.style.display = 'none';
@@ -118,7 +148,9 @@ form.addEventListener('submit', async (e) => {
   statusEl.innerHTML = '<span class="spinner"></span> Submitting job\u2026';
 
   try {
-    const body = new URLSearchParams({ep_url: epUrl, command: command});
+    const body = new URLSearchParams({command: command});
+    if (epUrl) body.append('ep_url', epUrl);
+    if (designDocUrl) body.append('design_doc_url', designDocUrl);
     if (cwd) body.append('cwd', cwd);
     const res = await fetch('/submit', {method: 'POST', body});
     if (!res.ok) { throw new Error((await res.json()).detail || res.statusText); }
