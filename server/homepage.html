@@ -9,7 +9,7 @@
   body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5;
          display: flex; justify-content: center; padding: 40px 16px; }
   .card { background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1);
-          padding: 32px; max-width: 720px; width: 100%; }
+          padding: 32px; max-width: 800px; width: 100%; }
   h1 { font-size: 1.4rem; margin-bottom: 4px; }
   p.sub { color: #666; font-size: .9rem; margin-bottom: 24px; }
   label { display: block; font-weight: 600; margin-bottom: 6px; font-size: .9rem; }
@@ -48,66 +48,107 @@
   .content-preview.expanded { max-height: none; }
   .toggle-expand { color: #4a90d9; cursor: pointer; font-size: .8rem;
                    display: inline-block; margin-top: 4px; }
+  .workflow-info { background: #E3F2FD; border: 1px solid #BBDEFB; border-radius: 6px;
+                   padding: 12px 16px; margin-bottom: 20px; font-size: .85rem; }
+  .workflow-info h3 { font-size: .9rem; margin-bottom: 8px; color: #1565C0; }
+  .workflow-info ul { margin: 0; padding-left: 20px; color: #333; }
+  .workflow-info li { margin-bottom: 4px; }
+  .pr-list { margin-top: 16px; background: #E8F5E9; border: 1px solid #C8E6C9;
+             border-radius: 6px; padding: 12px 16px; display: none; }
+  .pr-list h3 { font-size: .9rem; margin-bottom: 8px; color: #2E7D32; }
+  .pr-list a { color: #1565C0; text-decoration: none; }
+  .pr-list a:hover { text-decoration: underline; }
+  .pr-item { margin-bottom: 8px; font-size: .85rem; }
+  .field-group { margin-bottom: 14px; }
+  .field-hint { font-size: .8rem; color: #888; margin-top: 4px; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>OAPE Operator Feature Developer</h1>
-  <p class="sub">Generate controller code from an Enhancement Proposal and/or Design Document</p>
+  <p class="sub">Generate complete operator implementation from an OpenShift Enhancement Proposal</p>
+
+  <div class="workflow-info">
+    <h3>Workflow Overview</h3>
+    <ul>
+      <li><strong>PR #1:</strong> API Types - init, api-generate, api-generate-tests, review</li>
+      <li><strong>PR #2:</strong> Controller - api-implement, review</li>
+      <li><strong>PR #3:</strong> E2E Tests - e2e-generate, review</li>
+    </ul>
+  </div>
+
   <form id="epForm">
-    <label for="command">Command</label>
-    <select id="command" name="command">
-      <option value="api-implement" selected>api-implement</option>
-      <option value="analyze-rfe">analyze-rfe</option>
-    </select>
-    <label for="ep_url" id="ep_url_label" style="margin-top:14px">Enhancement Proposal PR URL <span style="color:#999">(optional if design doc provided)</span></label>
-    <input type="text" id="ep_url" name="ep_url"
-           placeholder="https://github.com/openshift/enhancements/pull/1234">
-    <label for="design_doc_url" id="design_doc_label" style="margin-top:14px">Design Document (Gist) URL <span style="color:#999">(optional if EP provided)</span></label>
-    <input type="text" id="design_doc_url" name="design_doc_url"
-           placeholder="https://gist.github.com/username/gist_id">
-    <p id="input_hint" style="margin-top:8px; font-size:.8rem; color:#666">
-      At least one of EP URL or Design Document is required. When both are provided, the design document takes precedence for implementation details.
-    </p>
-    <label for="cwd" style="margin-top:14px">Working Directory <span style="color:#999">(optional)</span></label>
-    <input type="text" id="cwd" name="cwd" placeholder="/path/to/operator-repo">
-    <button type="submit" id="submitBtn">Generate</button>
+    <div class="field-group">
+      <label for="repo">Target Repository</label>
+      <select id="repo" name="repo" required>
+        <option value="">-- Select a repository --</option>
+      </select>
+      <div class="field-hint">The operator repository where code will be generated</div>
+    </div>
+
+    <div class="field-group">
+      <label for="ep_url">Enhancement Proposal PR URL</label>
+      <input type="text" id="ep_url" name="ep_url"
+             placeholder="https://github.com/openshift/enhancements/pull/1234" required>
+      <div class="field-hint">The enhancement proposal that describes the feature</div>
+    </div>
+
+    <div class="field-group">
+      <label for="cwd">Working Directory <span style="color:#999">(optional)</span></label>
+      <input type="text" id="cwd" name="cwd" placeholder="/path/to/working-dir">
+      <div class="field-hint">Directory where repositories will be cloned (defaults to current directory)</div>
+    </div>
+
+    <button type="submit" id="submitBtn">Start Workflow</button>
   </form>
+
   <div id="status"></div>
+  <div id="prList" class="pr-list">
+    <h3>Created Pull Requests</h3>
+    <div id="prItems"></div>
+  </div>
   <div id="conversation"></div>
   <pre id="output"></pre>
 </div>
 <script>
-const form     = document.getElementById('epForm');
-const btn      = document.getElementById('submitBtn');
-const statusEl = document.getElementById('status');
-const convEl   = document.getElementById('conversation');
-const outputEl = document.getElementById('output');
-const epUrlLabel = document.getElementById('ep_url_label');
-const epUrlInput = document.getElementById('ep_url');
-const designDocLabel = document.getElementById('design_doc_label');
-const designDocInput = document.getElementById('design_doc_url');
-const designDocRow = designDocLabel.parentElement;
+const form      = document.getElementById('epForm');
+const btn       = document.getElementById('submitBtn');
+const statusEl  = document.getElementById('status');
+const convEl    = document.getElementById('conversation');
+const outputEl  = document.getElementById('output');
+const prListEl  = document.getElementById('prList');
+const prItemsEl = document.getElementById('prItems');
+const repoSelect = document.getElementById('repo');
 
-function updateInputLabel() {
-  const command = document.getElementById('command').value;
-  const inputHint = document.getElementById('input_hint');
-  if (command === 'analyze-rfe') {
-    epUrlLabel.innerHTML = 'RFE key or Jira URL';
-    epUrlInput.placeholder = 'RFE-7841 or https://issues.redhat.com/browse/RFE-7841';
-    designDocLabel.style.display = 'none';
-    designDocInput.style.display = 'none';
-    designDocInput.value = '';
-    inputHint.style.display = 'none';
-  } else {
-    epUrlLabel.innerHTML = 'Enhancement Proposal PR URL <span style="color:#999">(optional if design doc provided)</span>';
-    epUrlInput.placeholder = 'https://github.com/openshift/enhancements/pull/1234';
-    designDocLabel.style.display = 'block';
-    designDocInput.style.display = 'block';
-    inputHint.style.display = 'block';
+// Fetch available repositories on page load, grouped by product
+async function loadRepos() {
+  try {
+    const res = await fetch('/repos');
+    if (res.ok) {
+      const data = await res.json();
+      // Group repositories by product
+      const groups = {};
+      data.repositories.forEach(repo => {
+        if (!groups[repo.product]) groups[repo.product] = [];
+        groups[repo.product].push(repo);
+      });
+      Object.entries(groups).forEach(([product, repos]) => {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = product;
+        repos.forEach(repo => {
+          const option = document.createElement('option');
+          option.value = repo.short_name;
+          option.textContent = `${repo.short_name} — ${repo.role} (${repo.base_branch})`;
+          optgroup.appendChild(option);
+        });
+        repoSelect.appendChild(optgroup);
+      });
+    }
+  } catch (err) {
+    console.error('Failed to load repositories:', err);
   }
 }
-document.getElementById('command').addEventListener('change', updateInputLabel);
+loadRepos();
 
 function escapeHtml(text) {
   const d = document.createElement('div');
@@ -122,35 +163,23 @@ function truncate(str, maxLen) {
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const epUrl   = document.getElementById('ep_url').value.trim();
-  const designDocUrl = document.getElementById('design_doc_url').value.trim();
-  const cwd     = document.getElementById('cwd').value.trim();
-  const command = document.getElementById('command').value;
-  
-  // Validate: for analyze-rfe, EP is required; for others, at least one of EP or design doc
-  if (command === 'analyze-rfe') {
-    if (!epUrl) {
-      statusEl.innerHTML = '<span class="error">RFE key or Jira URL is required</span>';
-      return;
-    }
-  } else {
-    if (!epUrl && !designDocUrl) {
-      statusEl.innerHTML = '<span class="error">At least one of EP URL or Design Document URL is required</span>';
-      return;
-    }
-  }
+  const epUrl = document.getElementById('ep_url').value.trim();
+  const repo  = document.getElementById('repo').value;
+  const cwd   = document.getElementById('cwd').value.trim();
+
+  if (!epUrl || !repo) return;
 
   btn.disabled = true;
   outputEl.style.display = 'none';
   outputEl.textContent = '';
   convEl.style.display = 'none';
   convEl.innerHTML = '';
-  statusEl.innerHTML = '<span class="spinner"></span> Submitting job\u2026';
+  prListEl.style.display = 'none';
+  prItemsEl.innerHTML = '';
+  statusEl.innerHTML = '<span class="spinner"></span> Submitting workflow job\u2026';
 
   try {
-    const body = new URLSearchParams({command: command});
-    if (epUrl) body.append('ep_url', epUrl);
-    if (designDocUrl) body.append('design_doc_url', designDocUrl);
+    const body = new URLSearchParams({ep_url: epUrl, repo: repo});
     if (cwd) body.append('cwd', cwd);
     const res = await fetch('/submit', {method: 'POST', body});
     if (!res.ok) { throw new Error((await res.json()).detail || res.statusText); }
@@ -183,6 +212,17 @@ function streamJob(jobId) {
       if (result.output) {
         outputEl.textContent = result.output;
         outputEl.style.display = 'block';
+      }
+      // Show created PRs
+      if (result.prs && result.prs.length > 0) {
+        prListEl.style.display = 'block';
+        prItemsEl.innerHTML = result.prs.map((pr, i) => `
+          <div class="pr-item">
+            <strong>PR #${i + 1}:</strong>
+            <a href="${escapeHtml(pr.pr_url)}" target="_blank">${escapeHtml(pr.title || pr.pr_url)}</a>
+            <span style="color:#888">(${escapeHtml(pr.branch_name || '')})</span>
+          </div>
+        `).join('');
       }
     } else {
       statusEl.innerHTML = '<span class="error">Failed: '

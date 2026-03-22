@@ -20,7 +20,8 @@ COPY server/requirements.txt .
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy server code and config
-COPY server/server.py server/config.json ./
+COPY server/*.py server/agent.py server/config.json server/homepage.html ./
+COPY team-repos.csv /
 
 # Copy plugins directory
 # server.py resolves: Path(__file__).parent.parent / "plugins" / "oape"
@@ -31,4 +32,7 @@ USER 1001
 
 EXPOSE 8000
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN git config --global user.name "openshift-app-platform-shift-bot"
+RUN git config --global user.email "267347085+openshift-app-platform-shift-bot@users.noreply.github.com"
+
+CMD gh auth setup-git && uvicorn server:app --host 0.0.0.0 --port 8000
