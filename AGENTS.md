@@ -102,7 +102,7 @@ When using a design document (gist), it should contain structured implementation
 
 ## Supported Operator Repositories
 
-The allowed repositories and their base branches are defined in [`team-repos.csv`](team-repos.csv). DO NOT raise PRs on any repos beyond that list. Always read `team-repos.csv` to determine the correct repo URL and base branch before cloning or creating branches.
+The allowed repositories and their base branches are defined in [`team-repos.csv`](config/team-repos.csv). DO NOT raise PRs on any repos beyond that list. Always read `team-repos.csv` to determine the correct repo URL and base branch before cloning or creating branches.
 
 ---
 

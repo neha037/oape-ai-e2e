@@ -20,8 +20,10 @@ COPY server/requirements.txt .
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy server code and config
-COPY server/*.py server/agent.py server/config.json server/homepage.html ./
-COPY team-repos.csv /
+COPY server/*.py server/agent.py server/homepage.html ./
+
+# copy default config, users willing to customize should mount at runtime.
+COPY config /config
 
 # Copy plugins directory
 # server.py resolves: Path(__file__).parent.parent / "plugins" / "oape"
