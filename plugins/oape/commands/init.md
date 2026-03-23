@@ -100,6 +100,8 @@ I must match the user-provided short name against the allowlist. The allowlist i
   cert-manager-istio-csr    -> https://github.com/openshift/cert-manager-istio-csr
   external-secrets-operator -> https://github.com/openshift/external-secrets-operator
   external-secrets          -> https://github.com/openshift/external-secrets
+  ztiwm-operator            -> https://github.com/openshift/zero-trust-workload-identity-manager
+  ztiwm-spire               -> https://github.com/openshift/spiffe-spire
 
 Matching rules (applied in order):
 1. Exact match (case-insensitive): if the lowercased input exactly equals a short name, use it.
@@ -117,6 +119,8 @@ REPO_MAP["jetstack-cert-manager"]="https://github.com/openshift/jetstack-cert-ma
 REPO_MAP["cert-manager-istio-csr"]="https://github.com/openshift/cert-manager-istio-csr"
 REPO_MAP["external-secrets-operator"]="https://github.com/openshift/external-secrets-operator"
 REPO_MAP["external-secrets"]="https://github.com/openshift/external-secrets"
+REPO_MAP["ztiwm-operator"]="https://github.com/openshift/zero-trust-workload-identity-manager"
+REPO_MAP["ztiwm-spire"]="https://github.com/openshift/spiffe-spire"
 
 INPUT=$(echo "$REPO_SHORT_NAME" | tr '[:upper:]' '[:lower:]')
 

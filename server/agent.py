@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 
 # Resolve the plugin directory (repo root) relative to this file.
 PLUGIN_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "oape")
-TEAM_REPOS_CSV = Path(__file__).resolve().parent.parent / "team-repos.csv"
+TEAM_REPOS_CSV = Path(__file__).resolve().parent.parent / "config" / "team-repos.csv"
 
 CONVERSATION_LOG = Path("/tmp/conversation.log")
 
@@ -38,7 +38,7 @@ _handler = logging.FileHandler(CONVERSATION_LOG)
 _handler.setFormatter(logging.Formatter("%(message)s"))
 conv_logger.addHandler(_handler)
 
-with open(Path(__file__).resolve().parent / "config.json") as cf:
+with open(Path(__file__).resolve().parent.parent / "config" / "config.json") as cf:
     CONFIGS = json.loads(cf.read())
 
 
