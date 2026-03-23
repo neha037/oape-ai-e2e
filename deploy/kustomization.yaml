@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+
+configMapGenerator:
+  - name: oape-configs
+    files:
+      - ../config/config.json
+      - ../config/team-repos.csv
+    options:
+      disableNameSuffixHash: true

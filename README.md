@@ -178,7 +178,7 @@ Edit `deploy/deployment.yaml` and fill in the required values which are placehol
 ### Deploy on a k8s cluster
 
 ```shell
-oc apply -f deploy/deployment.yaml   # or kubectl apply -f deploy/deployment.yaml
+kubectl apply -k deploy/
 ```
 
 ### Adding a New Command
@@ -186,18 +186,3 @@ oc apply -f deploy/deployment.yaml   # or kubectl apply -f deploy/deployment.yam
 1. Add a new markdown file under `plugins/oape/commands/`
 2. The command will be available as `/oape:<command-name>`
 3. Update the plugin `README.md` documenting the new command
-
-### Plugin Structure
-
-```text
-plugins/oape/
-├── ztwim-test-generator/   # ZTWIM fixtures, docs, skills (commands are in commands/)
-├── .claude-plugin/
-│   └── plugin.json           # Required: plugin metadata
-├── commands/
-│   └── <command-name>.md     # Slash commands
-├── skills/
-│   └── <skill-name>/
-│       └── SKILL.md          # Reusable agent skills (optional)
-└── README.md                 # Plugin documentation
-```

@@ -49,10 +49,16 @@ spec:
             - name: gcloud-adc
               mountPath: /secrets/gcloud
               readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
       volumes:
         - name: gcloud-adc
           secret:
             secretName: gcloud-adc-secret
+        - name: config
+          configMap:
+            name: oape-configs
 ---
 apiVersion: v1
 kind: Service
