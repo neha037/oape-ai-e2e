@@ -7,7 +7,7 @@ resources:
 configMapGenerator:
   - name: oape-configs
     files:
-      - ../config/config.json
-      - ../config/team-repos.csv
+      - ./config/config.json
+      - ./config/team-repos.csv
     options:
       disableNameSuffixHash: true

@@ -45,6 +45,8 @@ spec:
           env:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcloud/application_default_credentials.json
+            - name: GH_TOKEN
+              value : "" # Replace with GitHub bot token
           volumeMounts:
             - name: gcloud-adc
               mountPath: /secrets/gcloud
