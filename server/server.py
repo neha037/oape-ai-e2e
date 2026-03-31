@@ -15,7 +15,6 @@ Endpoints:
 
 import asyncio
 import json
-import os
 from pathlib import Path
 import re
 import uuid
@@ -55,16 +54,6 @@ def _validate_ep_url(ep_url: str) -> None:
         )
 
 
-def _resolve_working_dir(cwd: str) -> str:
-    """Resolve and validate the working directory."""
-    working_dir = cwd if cwd else os.getcwd()
-    if not os.path.isdir(working_dir):
-        raise HTTPException(
-            status_code=400,
-            detail=f"The provided cwd is not a valid directory: {working_dir}",
-        )
-    return working_dir
-
 
 _HOMEPAGE_PATH = Path(__file__).parent / "homepage.html"
 HOMEPAGE_HTML = _HOMEPAGE_PATH.read_text()
@@ -97,7 +86,6 @@ async def list_repos():
 async def submit_workflow_job(
     ep_url: str = Form(...),
     repo: str = Form(...),
-    cwd: str = Form(default=""),
 ):
     """Validate inputs, create a workflow background job, and return its ID.
 
@@ -107,7 +95,6 @@ async def submit_workflow_job(
     - PR #3: e2e-generate → review → raise PR
     """
     _validate_ep_url(ep_url)
-    working_dir = _resolve_working_dir(cwd)
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -115,7 +102,6 @@ async def submit_workflow_job(
         "mode": "workflow",
         "ep_url": ep_url,
         "repo": repo,
-        "cwd": working_dir,
         "conversation": [],
         "message_event": asyncio.Condition(),
         "output": "",
@@ -123,7 +109,7 @@ async def submit_workflow_job(
         "error": None,
         "prs": [],
     }
-    asyncio.create_task(_run_workflow_job(job_id, ep_url, repo, working_dir))
+    asyncio.create_task(_run_workflow_job(job_id, ep_url, repo))
     return {"job_id": job_id}
 
 
@@ -138,7 +124,6 @@ async def job_status(job_id: str):
         "status": job["status"],
         "mode": job.get("mode", "legacy"),
         "ep_url": job["ep_url"],
-        "cwd": job["cwd"],
         "output": job.get("output", ""),
         "cost_usd": job.get("cost_usd", 0.0),
         "error": job.get("error"),
@@ -198,7 +183,7 @@ async def stream_job(job_id: str):
 
 
 async def _run_workflow_job(
-    job_id: str, ep_url: str, repo: str, working_dir: str
+    job_id: str, ep_url: str, repo: str,
 ):
     """Run the full workflow in the background and stream messages to the job store."""
     condition = jobs[job_id]["message_event"]
@@ -208,7 +193,7 @@ async def _run_workflow_job(
         jobs[job_id]["conversation"].append(msg)
         loop.create_task(_notify(condition))
 
-    result = await run_workflow(ep_url, repo, working_dir, on_message=on_message)
+    result = await run_workflow(ep_url, repo, on_message=on_message)
     if result.success:
         jobs[job_id]["status"] = "success"
         jobs[job_id]["output"] = result.output
@@ -250,15 +235,9 @@ async def api_workflow(
         description="Short name of the target repository "
         "(e.g. cert-manager-operator, external-secrets-operator)",
     ),
-    cwd: str = Query(
-        default="",
-        description="Absolute path to the working directory "
-        "where repositories will be cloned. Defaults to the current working directory.",
-    ),
 ):
     """Start the full 3-PR workflow (async, returns job_id)."""
     _validate_ep_url(ep_url)
-    working_dir = _resolve_working_dir(cwd)
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -266,7 +245,6 @@ async def api_workflow(
         "mode": "workflow",
         "ep_url": ep_url,
         "repo": repo,
-        "cwd": working_dir,
         "conversation": [],
         "message_event": asyncio.Condition(),
         "output": "",
@@ -274,7 +252,7 @@ async def api_workflow(
         "error": None,
         "prs": [],
     }
-    asyncio.create_task(_run_workflow_job(job_id, ep_url, repo, working_dir))
+    asyncio.create_task(_run_workflow_job(job_id, ep_url, repo))
 
     return {
         "job_id": job_id,

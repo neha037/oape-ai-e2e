@@ -93,12 +93,6 @@
       <div class="field-hint">The enhancement proposal that describes the feature</div>
     </div>
 
-    <div class="field-group">
-      <label for="cwd">Working Directory <span style="color:#999">(optional)</span></label>
-      <input type="text" id="cwd" name="cwd" placeholder="/path/to/working-dir">
-      <div class="field-hint">Directory where repositories will be cloned (defaults to current directory)</div>
-    </div>
-
     <button type="submit" id="submitBtn">Start Workflow</button>
   </form>
 
@@ -165,7 +159,6 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const epUrl = document.getElementById('ep_url').value.trim();
   const repo  = document.getElementById('repo').value;
-  const cwd   = document.getElementById('cwd').value.trim();
 
   if (!epUrl || !repo) return;
 
@@ -180,7 +173,6 @@ form.addEventListener('submit', async (e) => {
 
   try {
     const body = new URLSearchParams({ep_url: epUrl, repo: repo});
-    if (cwd) body.append('cwd', cwd);
     const res = await fetch('/submit', {method: 'POST', body});
     if (!res.ok) { throw new Error((await res.json()).detail || res.statusText); }
     const {job_id} = await res.json();

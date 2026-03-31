@@ -10,6 +10,7 @@ Uses the Claude Agent SDK to orchestrate a sequence of OAPE skills that:
 import csv
 import json
 import logging
+import tempfile
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -192,7 +193,6 @@ Begin now. Execute PR #1, then immediately PR #2, then immediately PR #3 — all
 async def run_workflow(
     ep_url: str,
     repo_short_name: str,
-    working_dir: str,
     on_message: Callable[[dict], None] | None = None,
 ) -> WorkflowResult:
     """Run the full operator feature development workflow.
@@ -200,7 +200,6 @@ async def run_workflow(
     Args:
         ep_url: The enhancement proposal PR URL.
         repo_short_name: Short name of the target repository.
-        working_dir: Absolute path to the working directory.
         on_message: Optional callback invoked with each conversation message
             dict as it arrives, enabling real-time streaming.
 
@@ -217,6 +216,8 @@ async def run_workflow(
         )
 
     prompt = _build_workflow_prompt(ep_url, repo_short_name, repo_info)
+
+    working_dir = tempfile.mkdtemp(prefix="oape-")
 
     options = ClaudeAgentOptions(
         system_prompt=(
