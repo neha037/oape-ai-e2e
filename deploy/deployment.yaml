@@ -18,6 +18,18 @@ stringData:
   # that can authenticate with GCP project.
   application_default_credentials.json: '{}'
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gh-app-secret
+type: Opaque
+stringData:
+  # Replace with your GitHub App private key (.pem file)
+  bot-key.pem: |
+    -----BEGIN RSA PRIVATE KEY-----
+    <key>
+    -----END RSA PRIVATE KEY-----
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,11 +57,16 @@ spec:
           env:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcloud/application_default_credentials.json
-            - name: GH_TOKEN
-              value : "" # Replace with GitHub bot token
+            - name: GH_APP_ID
+              value: "3065249" # Replace with GitHub App ID if otherwise
+            - name: GH_APP_PEM_FILE_PATH
+              value: /secrets/gh-app/bot-key.pem
           volumeMounts:
             - name: gcloud-adc
               mountPath: /secrets/gcloud
+              readOnly: true
+            - name: gh-app-key
+              mountPath: /secrets/gh-app
               readOnly: true
             - name: config
               mountPath: /config
@@ -58,6 +75,9 @@ spec:
         - name: gcloud-adc
           secret:
             secretName: gcloud-adc-secret
+        - name: gh-app-key
+          secret:
+            secretName: gh-app-secret
         - name: config
           configMap:
             name: oape-configs

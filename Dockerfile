@@ -22,6 +22,10 @@ RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 # Copy server code and config
 COPY server/*.py server/agent.py server/homepage.html ./
 
+# Copy GitHub App token generator and credential helper
+COPY server/ghpat.py ./
+COPY server/gh-credential-helper.sh /bin/gh-credential-helper
+
 # copy default config, users willing to customize should mount at runtime.
 COPY config /config
 
@@ -33,12 +37,15 @@ COPY plugins /plugins
 # Configure git globally while still root, and ensure the home directory is
 # writable for arbitrary UIDs (OpenShift runs containers as random UID).
 RUN git config --global user.name "openshift-app-platform-shift-bot" && \
-    git config --global user.email "267347085+openshift-app-platform-shift-bot@users.noreply.github.com" && \
+    git config --global user.email "267347085+openshift-app-platform-shift-bot@users.noreply.github.com"
+
+RUN chmod +x /bin/gh-credential-helper && \
     chmod -R g=u /opt/app-root/src
-    # required for gh auth setup below
+
+RUN git config --global credential.helper '/bin/gh-credential-helper'
 
 USER 1001
 
 EXPOSE 8000
 
-CMD gh auth setup-git && uvicorn server:app --host 0.0.0.0 --port 8000
+CMD uvicorn server:app --host 0.0.0.0 --port 8000
