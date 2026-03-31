@@ -1,9 +1,9 @@
 #!/bin/bash
-# Git credential helper that generates a fresh GitHub App installation token on demand.
-# Called by git automatically whenever credentials are needed.
+# Git credential helper that reads a GitHub App installation token
+# from a shared volume (written by the ghtoken-sidecar container).
 if [ "$1" != "get" ]; then exit 0; fi
 
-TOKEN=$(python3.11 /app/ghpat.py)
+TOKEN=$(cat /shared/gh-token 2>/dev/null)
 
 echo "protocol=https"
 echo "host=github.com"

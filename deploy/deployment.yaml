@@ -57,20 +57,30 @@ spec:
           env:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcloud/application_default_credentials.json
+          volumeMounts:
+            - name: gcloud-adc
+              mountPath: /secrets/gcloud
+              readOnly: true
+            - name: gh-token-shared
+              mountPath: /shared
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+        - name: ghtoken-sidecar
+          image: ghcr.io/shiftweek/oape-ai-e2e:latest
+          command: ["/opt/ghtoken/token-refresh.sh"]
+          env:
             - name: GH_APP_ID
               value: "3065249" # Replace with GitHub App ID if otherwise
             - name: GH_APP_PEM_FILE_PATH
               value: /secrets/gh-app/bot-key.pem
           volumeMounts:
-            - name: gcloud-adc
-              mountPath: /secrets/gcloud
-              readOnly: true
             - name: gh-app-key
               mountPath: /secrets/gh-app
               readOnly: true
-            - name: config
-              mountPath: /config
-              readOnly: true
+            - name: gh-token-shared
+              mountPath: /shared
       volumes:
         - name: gcloud-adc
           secret:
@@ -78,6 +88,8 @@ spec:
         - name: gh-app-key
           secret:
             secretName: gh-app-secret
+        - name: gh-token-shared
+          emptyDir: {}
         - name: config
           configMap:
             name: oape-configs

@@ -20,11 +20,15 @@ COPY server/requirements.txt .
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy server code and config
-COPY server/*.py server/agent.py server/homepage.html ./
+COPY server/server.py server/agent.py server/homepage.html ./
 
-# Copy GitHub App token generator and credential helper
-COPY server/ghpat.py ./
+# Copy git credential helper (reads token from sidecar's shared volume)
 COPY server/gh-credential-helper.sh /bin/gh-credential-helper
+
+# Copy GitHub App token generator and refresh loop (used by sidecar entrypoint)
+COPY server/ghpat.py /opt/ghtoken/ghpat.py
+COPY server/token-refresh.sh /opt/ghtoken/token-refresh.sh
+RUN chmod +x /opt/ghtoken/token-refresh.sh
 
 # copy default config, users willing to customize should mount at runtime.
 COPY config /config
