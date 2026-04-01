@@ -41,6 +41,9 @@ if [ -z "$REPO_SHORT_NAME" ]; then
   echo "  cert-manager-istio-csr     -- openshift/cert-manager-istio-csr"
   echo "  external-secrets-operator  -- openshift/external-secrets-operator"
   echo "  external-secrets           -- openshift/external-secrets"
+  echo "  ztiwm-operator             -- openshift/zero-trust-workload-identity-manager"
+  echo "  ztiwm-spire                -- openshift/spiffe-spire"
+  echo "  must-gather-operator       -- openshift/must-gather-operator"
   exit 1
 fi
 
@@ -311,6 +314,9 @@ When failing, provide a clear error message explaining:
     - `cert-manager-istio-csr` -- openshift/cert-manager-istio-csr
     - `external-secrets-operator` -- openshift/external-secrets-operator
     - `external-secrets` -- openshift/external-secrets
+    - `ztiwm-operator` -- openshift/zero-trust-workload-identity-manager
+    - `ztiwm-spire` -- openshift/spiffe-spire
+    - `must-gather-operator` -- openshift/must-gather-operator
 
 ## Prerequisites
 
