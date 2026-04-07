@@ -31,7 +31,7 @@ COPY server/token-refresh.sh /opt/ghtoken/token-refresh.sh
 RUN chmod +x /opt/ghtoken/token-refresh.sh
 
 # copy default config, users willing to customize should mount at runtime.
-COPY config /config
+COPY deploy/config /config
 
 # Copy plugins directory
 # server.py resolves: Path(__file__).parent.parent / "plugins" / "oape"
