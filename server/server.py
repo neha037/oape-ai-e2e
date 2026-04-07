@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
 
 from agent import run_workflow, TEAM_REPOS
-
+import bg  # noqa: F401 — starts GH_TOKEN refresh thread on import
 
 app = FastAPI(
     title="OAPE Operator Feature Developer",

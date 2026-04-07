@@ -20,7 +20,7 @@ COPY server/requirements.txt .
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy server code and config
-COPY server/server.py server/agent.py server/homepage.html ./
+COPY server/server.py server/agent.py server/bg.py server/homepage.html ./
 
 # Copy git credential helper (reads token from sidecar's shared volume)
 COPY server/gh-credential-helper.sh /bin/gh-credential-helper
