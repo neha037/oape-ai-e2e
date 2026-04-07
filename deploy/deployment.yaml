@@ -19,6 +19,12 @@ spec:
           image: ghcr.io/shiftweek/oape-ai-e2e:latest
           ports:
             - containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            runAsNonRoot: true
           resources:
             requests:
               cpu: 500m
@@ -45,6 +51,12 @@ spec:
         - name: ghtoken-sidecar
           image: ghcr.io/shiftweek/oape-ai-e2e:latest
           command: ["/opt/ghtoken/token-refresh.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            runAsNonRoot: true
           resources:
             requests:
               cpu: 100m
