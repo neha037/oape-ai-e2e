@@ -6,17 +6,22 @@ AI-driven OpenShift operator development tools, following OpenShift and Kubernet
 
 ### `/oape:init`
 
-Clones an allowed OpenShift operator repository by short name into the current directory so that subsequent `/oape:*` commands can operate immediately.
+Clones an OpenShift operator git repository by URL into the current directory and checks out the specified base branch so that subsequent `/oape:*` commands can operate immediately.
 
 **Usage:**
 ```shell
-/oape:init cert-manager-operator
+/oape:init <git-url> <base-branch>
+```
+
+**Example:**
+```shell
+/oape:init https://github.com/openshift/cert-manager-operator main
 ```
 
 **What it does:**
-1. **Prechecks** -- Validates the short name argument, required tools (`git`, `gh`), and GitHub authentication.
-2. **Repository Resolution** -- Matches the short name against the allowlist (case-insensitive, with partial match disambiguation).
-3. **Clone** -- Runs `git clone --filter=blob:none` into the current working directory. If the directory already exists with the correct remote, reuses it.
+1. **Prechecks** -- Validates both arguments (git URL and base branch) and required tools (`git`).
+2. **Clone** -- Runs `git clone --filter=blob:none` into the current working directory. If the directory already exists with the correct remote, reuses it.
+3. **Checkout** -- Checks out the specified base branch.
 4. **Verify** -- Changes into the cloned directory and reports the Go module and detected framework.
 
 ### `/oape:api-generate`
