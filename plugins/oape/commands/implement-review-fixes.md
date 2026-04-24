@@ -34,7 +34,7 @@ I must parse the review report and extract:
 
 Each issue has:
 - severity: "CRITICAL" | "WARNING" | "INFO"
-- module: which review module flagged this (Logic, Bash, OLM, Build)
+- module: which review module flagged this (Logic, Bash, OLM, Build, Adaptive)
 - file: path to the file that needs fixing
 - line: line number where the issue occurs
 - description: what the problem is
