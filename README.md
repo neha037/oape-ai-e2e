@@ -74,7 +74,7 @@ The container image used in [Dockerfile](./Dockerfile) already adds these depend
 
 Add the marketplace:
 ```shell
-/plugin marketplace add shiftweek/oape-ai-e2e
+/plugin marketplace add openshift-eng/oape-ai-e2e
 ```
 
 Install the plugin:
@@ -105,7 +105,7 @@ Cursor can discover the commands by symlinking this repo into your `~/.cursor/co
 
 ```bash
 mkdir -p ~/.cursor/commands
-git clone git@github.com:shiftweek/oape-ai-e2e.git
+git clone git@github.com:openshift-eng/oape-ai-e2e.git
 ln -s oape-ai-e2e ~/.cursor/commands/oape-ai-e2e
 ```
 
@@ -220,8 +220,8 @@ Deploy the Python web server to run as a container or as a pod on a Kubernetes c
 ### Build the container image
 
 ```shell
-podman build -t ghcr.io/shiftweek/oape-ai-e2e:latest .
-podman push ghcr.io/shiftweek/oape-ai-e2e:latest
+podman build -t ghcr.io/openshift-eng/oape-ai-e2e:latest .
+podman push ghcr.io/openshift-eng/oape-ai-e2e:latest
 ```
 
 ### Configure the deployment

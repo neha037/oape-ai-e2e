@@ -5,6 +5,6 @@
   "author": {
     "name": "oape"
   },
-  "repository": "https://github.com/shiftweek/oape-ai-e2e",
+  "repository": "https://github.com/openshift-eng/oape-ai-e2e",
   "keywords": ["openshift", "api", "kubernetes", "operator", "code-generation"]
 }

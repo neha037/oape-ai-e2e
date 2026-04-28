@@ -1,4 +1,4 @@
-module github.com/shiftweek/oape-ai-e2e/go-server-v2
+module github.com/openshift-eng/oape-ai-e2e/go-server
 
 go 1.23
 

@@ -55,12 +55,12 @@ spec:
       serviceAccountName: shift-go-server
       containers:
         - name: shift-go-server
-          image: ghcr.io/shiftweek/oape-ai-e2e/go-server:latest
+          image: ghcr.io/openshift-eng/oape-ai-e2e/go-server:latest
           ports:
             - containerPort: 8080
           env:
             - name: WORKER_IMAGE
-              value: ghcr.io/shiftweek/oape-ai-e2e/agent-worker:latest
+              value: ghcr.io/openshift-eng/oape-ai-e2e/agent-worker:latest
             - name: GH_TOKEN_SERVICE_URL
               value: http://localhost:8081
           volumeMounts:
@@ -75,7 +75,7 @@ spec:
               cpu: "1"
               memory: 1Gi
         - name: ghpat-sidecar
-          image: ghcr.io/shiftweek/oape-ai-e2e/gh-token-minter:latest
+          image: ghcr.io/openshift-eng/oape-ai-e2e/gh-token-minter:latest
           ports:
             - containerPort: 8081
           env:
