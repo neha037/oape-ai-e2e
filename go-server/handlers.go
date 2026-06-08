@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -10,11 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
-	"time"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 //go:embed static/homepage.html
@@ -22,17 +18,21 @@ var staticFS embed.FS
 
 // App holds shared dependencies for HTTP handlers.
 type App struct {
-	cfg *ServerConfig
-	k8s *K8sClient
+	cfg     *ServerConfig
+	backend Backend
 }
 
 var epURLPattern = regexp.MustCompile(`^https://github\.com/openshift/enhancements/pull/\d+/?$`)
+var jiraTicketPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]+-\d+$`)
 
 // CreateWorkflowRequest is the JSON body for POST /api/v1/workflows.
 type CreateWorkflowRequest struct {
-	EPUrl      string `json:"ep_url"`
-	BaseBranch string `json:"base_branch"`
-	RepoURL    string `json:"repo_url"`
+	EPUrl        string `json:"ep_url"`
+	BaseBranch   string `json:"base_branch"`
+	RepoURL      string `json:"repo_url"`
+	JiraTicket   string `json:"jira_ticket"`
+	JiraToken    string `json:"jira_token"`
+	WorkflowMode string `json:"workflow_mode"`
 }
 
 // WorkflowSummary is a compact representation for workflow lists.
@@ -60,8 +60,9 @@ type WorkflowDetailResponse struct {
 	Message    string `json:"message,omitempty"`
 	CreatedAt  string `json:"createdAt"`
 	RepoURL    string `json:"repoUrl"`
-	EPUrl      string `json:"epUrl"`
+	EPUrl      string `json:"epUrl,omitempty"`
 	BaseBranch string `json:"baseBranch"`
+	JiraTicket string `json:"jiraTicket,omitempty"`
 }
 
 // CreateWorkflowResponse for POST /api/v1/workflows.
@@ -70,9 +71,14 @@ type CreateWorkflowResponse struct {
 	Status string `json:"status"`
 }
 
-// fetchGHToken requests a fresh GitHub App installation token from the ghpat HTTP service.
-// Returns the token and its expiry timestamp (ISO 8601 format).
+// fetchGHToken returns a GitHub token. If GH_TOKEN is set, it is used directly
+// (local dev mode). Otherwise it requests a fresh GitHub App installation token
+// from the ghpat HTTP sidecar service.
 func fetchGHToken(serviceURL string) (token string, expiresAt string, err error) {
+	if t := os.Getenv("GH_TOKEN"); t != "" {
+		return t, "", nil
+	}
+
 	resp, err := http.Get(serviceURL + "/token")
 	if err != nil {
 		return "", "", fmt.Errorf("requesting token from ghpat service: %w", err)
@@ -137,7 +143,7 @@ func (a *App) HandleListRepos(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleCreateWorkflow creates a K8s Job for a workflow run.
+// HandleCreateWorkflow starts a workflow run via the configured backend.
 func (a *App) HandleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	var req CreateWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -145,13 +151,31 @@ func (a *App) HandleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.EPUrl == "" || req.RepoURL == "" || req.BaseBranch == "" {
-		writeError(w, http.StatusBadRequest, "ep_url, repo_url, and base_branch are required")
+	if req.RepoURL == "" || req.BaseBranch == "" {
+		writeError(w, http.StatusBadRequest, "repo_url and base_branch are required")
 		return
 	}
 
-	if !epURLPattern.MatchString(req.EPUrl) {
+	if req.EPUrl == "" && req.JiraTicket == "" {
+		writeError(w, http.StatusBadRequest, "at least one of ep_url or jira_ticket is required")
+		return
+	}
+
+	if req.EPUrl != "" && !epURLPattern.MatchString(req.EPUrl) {
 		writeError(w, http.StatusBadRequest, "ep_url must be a valid OpenShift enhancement PR URL")
+		return
+	}
+
+	if req.JiraTicket != "" && !jiraTicketPattern.MatchString(req.JiraTicket) {
+		writeError(w, http.StatusBadRequest, "jira_ticket must be a valid Jira key (e.g. OCPBUGS-12345)")
+		return
+	}
+
+	if req.WorkflowMode == "" {
+		req.WorkflowMode = "full"
+	}
+	if req.WorkflowMode != "full" && req.WorkflowMode != "feature" && req.WorkflowMode != "bugfix" {
+		writeError(w, http.StatusBadRequest, "workflow_mode must be one of: full, feature, bugfix")
 		return
 	}
 
@@ -169,26 +193,31 @@ func (a *App) HandleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	params := WorkflowParams{
-		EPUrl:            req.EPUrl,
-		RepoURL:          req.RepoURL,
-		BaseBranch:       req.BaseBranch,
+		EPUrl:        req.EPUrl,
+		RepoURL:      req.RepoURL,
+		BaseBranch:   req.BaseBranch,
+		GHToken:      ghToken,
+		JiraTicket:   req.JiraTicket,
+		JiraToken:    req.JiraToken,
+		WorkflowMode: req.WorkflowMode,
+
+		GHTokenExpiry:    ghTokenExpiry,
+		GHTokenSecret:    "shift-gh-token-" + jobID,
 		WorkerImage:      a.cfg.WorkerImage,
 		EnvConfigMap:     a.cfg.WorkerEnvConfigMap,
 		GCloudSecret:     a.cfg.GCloudSecretName,
-		GHToken:          ghToken,
-		GHTokenExpiry:    ghTokenExpiry,
-		GHTokenSecret:    "shift-gh-token-" + jobID,
 		ConfigsConfigMap: a.cfg.ConfigsConfigMap,
 		TTLAfterFinished: a.cfg.TTLAfterFinished,
 	}
 
-	if err := a.k8s.CreateWorkflowJob(r.Context(), jobID, params); err != nil {
-		log.Printf("ERROR: creating job: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to create workflow job")
+	if err := a.backend.StartWorkflow(r.Context(), jobID, params); err != nil {
+		log.Printf("ERROR: creating workflow: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create workflow")
 		return
 	}
 
-	log.Printf("Created workflow job %s for ep=%s repo=%s base_branch=%s", jobID, req.EPUrl, req.RepoURL, req.BaseBranch)
+	log.Printf("Created workflow %s for ep=%s jira=%s repo=%s base_branch=%s mode=%s",
+		jobID, req.EPUrl, req.JiraTicket, req.RepoURL, req.BaseBranch, req.WorkflowMode)
 	writeJSON(w, http.StatusCreated, CreateWorkflowResponse{
 		ID:     jobID,
 		Status: "pending",
@@ -197,7 +226,7 @@ func (a *App) HandleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 // HandleListWorkflows returns all workflow jobs.
 func (a *App) HandleListWorkflows(w http.ResponseWriter, r *http.Request) {
-	jobs, err := a.k8s.ListJobs(r.Context())
+	jobs, err := a.backend.ListWorkflows(r.Context())
 	if err != nil {
 		log.Printf("ERROR: listing workflows: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to list workflows")
@@ -225,7 +254,7 @@ func (a *App) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := a.k8s.GetJobInfo(r.Context(), jobID)
+	info, err := a.backend.GetWorkflowInfo(r.Context(), jobID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("workflow not found: %s", jobID))
 		return
@@ -239,10 +268,11 @@ func (a *App) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		RepoURL:    info.RepoURL,
 		EPUrl:      info.EPUrl,
 		BaseBranch: info.BaseBranch,
+		JiraTicket: info.JiraTicket,
 	})
 }
 
-// HandleWorkflowLogs streams pod logs as SSE events.
+// HandleWorkflowLogs streams workflow logs as SSE events via the backend.
 func (a *App) HandleWorkflowLogs(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("job_id")
 	if jobID == "" {
@@ -261,110 +291,7 @@ func (a *App) HandleWorkflowLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	ctx := r.Context()
-
-	// Wait for the pod to be available (up to 5 minutes).
-	var podName string
-	deadline := time.Now().Add(5 * time.Minute)
-	for {
-		if time.Now().After(deadline) {
-			fmt.Fprintf(w, "event: complete\ndata: %s\n\n",
-				`{"status":"failed","message":"timed out waiting for pod"}`)
-			flusher.Flush()
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		name, err := a.k8s.GetJobPod(ctx, jobID)
-		if err == nil {
-			podName = name
-			break
-		}
-
-		fmt.Fprintf(w, "event: status\ndata: %s\n\n",
-			`{"status":"waiting_for_pod"}`)
-		flusher.Flush()
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
+	if err := a.backend.StreamLogs(r.Context(), jobID, w, flusher); err != nil {
+		log.Printf("ERROR: streaming logs for workflow %s: %v", jobID, err)
 	}
-
-	// Wait for pod to be running or terminated.
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		pod, err := a.k8s.clientset.CoreV1().Pods(a.k8s.namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			fmt.Fprintf(w, "event: status\ndata: %s\n\n",
-				`{"status":"waiting_for_pod"}`)
-			flusher.Flush()
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		phase := pod.Status.Phase
-		if phase == corev1.PodRunning || phase == corev1.PodSucceeded || phase == corev1.PodFailed {
-			break
-		}
-
-		fmt.Fprintf(w, "event: status\ndata: %s\n\n",
-			fmt.Sprintf(`{"status":"pod_%s"}`, string(phase)))
-		flusher.Flush()
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
-	}
-
-	// Stream pod logs.
-	logStream, err := a.k8s.StreamPodLogs(ctx, podName, true)
-	if err != nil {
-		log.Printf("ERROR: streaming logs for pod %s: %v", podName, err)
-		fmt.Fprintf(w, "event: complete\ndata: %s\n\n",
-			`{"status":"failed","message":"failed to stream logs"}`)
-		flusher.Flush()
-		return
-	}
-	defer logStream.Close()
-
-	scanner := bufio.NewScanner(logStream)
-	// Increase scanner buffer for long log lines.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		line := scanner.Text()
-		fmt.Fprintf(w, "event: log\ndata: %s\n\n", line)
-		flusher.Flush()
-	}
-
-	// Log stream ended — get final job status.
-	status, err := a.k8s.GetJobStatus(ctx, jobID)
-	if err != nil {
-		fmt.Fprintf(w, "event: complete\ndata: %s\n\n",
-			`{"status":"unknown","message":"could not determine final status"}`)
-	} else {
-		data, _ := json.Marshal(status)
-		fmt.Fprintf(w, "event: complete\ndata: %s\n\n", data)
-	}
-	flusher.Flush()
 }

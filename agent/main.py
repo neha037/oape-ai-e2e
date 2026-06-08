@@ -16,17 +16,27 @@ from agent import run_workflow
 
 
 async def main():
-    ep_url = os.environ.get("EP_URL")
+    ep_url = os.environ.get("EP_URL") or None
     repo = os.environ.get("REPO_URL")
     base_branch = os.environ.get("BASE_BRANCH")
+    jira_ticket = os.environ.get("JIRA_TICKET") or None
+    workflow_mode = os.environ.get("WORKFLOW_MODE", "full")
 
-    if not ep_url or not repo or not base_branch:
-        print("ERROR: EP_URL, REPO, BASE_BRANCH environment variables are required", file=sys.stderr)
+    if not repo or not base_branch:
+        print("ERROR: REPO_URL and BASE_BRANCH environment variables are required", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Starting workflow: ep_url={ep_url} repo={repo}", flush=True)
+    if not ep_url and not jira_ticket:
+        print("ERROR: at least one of EP_URL or JIRA_TICKET is required", file=sys.stderr)
+        sys.exit(1)
 
-    result = await run_workflow(ep_url, repo, base_branch, on_message=lambda msg: print_json(data=msg))
+    print(f"Starting workflow: ep_url={ep_url} jira_ticket={jira_ticket} repo={repo} mode={workflow_mode}", flush=True)
+
+    result = await run_workflow(
+        ep_url, jira_ticket, repo, base_branch,
+        workflow_mode=workflow_mode,
+        on_message=lambda msg: print_json(data=msg),
+    )
 
     if result.success:
         print(f"WORKFLOW_SUCCESS cost=${result.cost_usd:.4f}", flush=True)

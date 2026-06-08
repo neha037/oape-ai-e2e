@@ -11,23 +11,31 @@ import (
 
 // RepoInfo holds metadata about an allowed operator repository.
 type RepoInfo struct {
-	URL     string `json:"url"`
-	Product string `json:"product"`
-	Role    string `json:"role"`
+	URL        string `json:"url"`
+	Product    string `json:"product"`
+	Role       string `json:"role"`
+	BaseBranch string `json:"baseBranch,omitempty"`
 }
 
 // ServerConfig holds all configuration for the orchestrator.
 type ServerConfig struct {
+	ListenAddr    string
+	ConfigDir     string
+	ExecutionMode string // "local" or "k8s" (default: "local")
+	TeamRepos     []RepoInfo
+
+	// Local-mode fields.
+	AgentScriptPath string // path to agent/main.py
+	PythonBin       string // python binary name
+
+	// K8s-mode fields (ignored in local mode).
 	WorkerImage        string
 	JobNamespace       string
 	TTLAfterFinished   int32
-	ListenAddr         string
-	ConfigDir          string
 	WorkerEnvConfigMap string
 	GCloudSecretName   string
 	GHTokenServiceURL  string
 	ConfigsConfigMap   string
-	TeamRepos          []RepoInfo
 }
 
 func envOrDefault(key, fallback string) string {
@@ -52,7 +60,6 @@ func LoadConfig() (*ServerConfig, error) {
 
 	namespace := os.Getenv("JOB_NAMESPACE")
 	if namespace == "" {
-		// Read from in-cluster service account.
 		data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 		if err == nil {
 			namespace = strings.TrimSpace(string(data))
@@ -67,20 +74,27 @@ func LoadConfig() (*ServerConfig, error) {
 	}
 
 	return &ServerConfig{
-		WorkerImage:        envOrDefault("WORKER_IMAGE", "quay.io/openshift-oap/ai-agent:latest"), // :) fictional placeholder
+		ListenAddr:    envOrDefault("LISTEN_ADDR", ":8080"),
+		ConfigDir:     configDir,
+		ExecutionMode: envOrDefault("EXECUTION_MODE", "local"),
+		TeamRepos:     repos,
+
+		AgentScriptPath: envOrDefault("AGENT_SCRIPT_PATH", "../agent/main.py"),
+		PythonBin:       envOrDefault("PYTHON_BIN", "python3.11"),
+
+		WorkerImage:        envOrDefault("WORKER_IMAGE", "quay.io/openshift-oap/ai-agent:latest"),
 		JobNamespace:       namespace,
 		TTLAfterFinished:   ttl,
-		ListenAddr:         envOrDefault("LISTEN_ADDR", ":8080"),
-		ConfigDir:          configDir,
 		WorkerEnvConfigMap: envOrDefault("WORKER_ENV_CONFIGMAP", "shift-worker-config"),
 		GCloudSecretName:   envOrDefault("GCLOUD_SECRET_NAME", "gcloud-adc"),
 		GHTokenServiceURL:  envOrDefault("GH_TOKEN_SERVICE_URL", "http://localhost:8081"),
 		ConfigsConfigMap:   envOrDefault("CONFIGS_CONFIGMAP", "shift-worker-config"),
-		TeamRepos:          repos,
 	}, nil
 }
 
 // loadTeamRepos parses team-repos.csv into a slice of RepoInfo.
+// Supports both 3-column (product,role,repo_url) and 4-column
+// (product,role,repo_url,base_branch) formats for backward compatibility.
 func loadTeamRepos(csvPath string) ([]RepoInfo, error) {
 	f, err := os.Open(csvPath)
 	if err != nil {
@@ -89,6 +103,7 @@ func loadTeamRepos(csvPath string) ([]RepoInfo, error) {
 	defer f.Close()
 
 	reader := csv.NewReader(f)
+	reader.FieldsPerRecord = -1 // allow variable column count
 	records, err := reader.ReadAll()
 	if err != nil {
 		return nil, err
@@ -99,7 +114,6 @@ func loadTeamRepos(csvPath string) ([]RepoInfo, error) {
 	}
 
 	var repos []RepoInfo
-	// Skip header row.
 	for _, row := range records[1:] {
 		if len(row) < 3 {
 			continue
@@ -112,10 +126,16 @@ func loadTeamRepos(csvPath string) ([]RepoInfo, error) {
 			continue
 		}
 
+		baseBranch := ""
+		if len(row) >= 4 {
+			baseBranch = strings.TrimSpace(row[3])
+		}
+
 		repos = append(repos, RepoInfo{
-			URL:     repoURL,
-			Product: product,
-			Role:    role,
+			URL:        repoURL,
+			Product:    product,
+			Role:       role,
+			BaseBranch: baseBranch,
 		})
 	}
 

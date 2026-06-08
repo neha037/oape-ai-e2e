@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,18 +19,17 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// K8sClient wraps a Kubernetes clientset with the target namespace.
-type K8sClient struct {
+// K8sBackend runs agent workflows as Kubernetes Jobs.
+type K8sBackend struct {
 	clientset kubernetes.Interface
 	namespace string
 }
 
-// NewK8sClient creates a Kubernetes client using in-cluster config,
+// NewK8sBackend creates a Kubernetes client using in-cluster config,
 // falling back to KUBECONFIG for local development.
-func NewK8sClient(namespace string) (*K8sClient, error) {
+func NewK8sBackend(namespace string) (*K8sBackend, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		// Fall back to kubeconfig for local dev.
 		config, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 		if err != nil {
 			return nil, fmt.Errorf("building k8s config: %w", err)
@@ -37,30 +41,13 @@ func NewK8sClient(namespace string) (*K8sClient, error) {
 		return nil, fmt.Errorf("creating k8s clientset: %w", err)
 	}
 
-	return &K8sClient{clientset: clientset, namespace: namespace}, nil
+	return &K8sBackend{clientset: clientset, namespace: namespace}, nil
 }
 
-// WorkflowParams holds the parameters needed to create a workflow K8s Job.
-type WorkflowParams struct {
-	EPUrl            string
-	RepoURL          string
-	BaseBranch       string
-	WorkerImage      string
-	EnvConfigMap     string
-	GCloudSecret     string
-	GHToken          string
-	GHTokenExpiry    string
-	GHTokenSecret    string
-	ConfigsConfigMap string
-	TTLAfterFinished int32
-}
-
-// CreateWorkflowJob creates a Kubernetes Job for a workflow run.
-func (c *K8sClient) CreateWorkflowJob(ctx context.Context, jobID string, params WorkflowParams) error {
+func (c *K8sBackend) StartWorkflow(ctx context.Context, jobID string, params WorkflowParams) error {
 	jobName := "shift-workflow-" + jobID
 	secretName := params.GHTokenSecret
 
-	// Create a Secret to hold the GitHub token.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: secretName,
@@ -73,7 +60,8 @@ func (c *K8sClient) CreateWorkflowJob(ctx context.Context, jobID string, params 
 			},
 		},
 		StringData: map[string]string{
-			"GH_TOKEN": params.GHToken,
+			"GH_TOKEN":            params.GHToken,
+			"JIRA_PERSONAL_TOKEN": params.JiraToken,
 		},
 	}
 	if _, err := c.clientset.CoreV1().Secrets(c.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
@@ -94,6 +82,7 @@ func (c *K8sClient) CreateWorkflowJob(ctx context.Context, jobID string, params 
 				"app-platform-shift.openshift.github.io/repo-url":    params.RepoURL,
 				"app-platform-shift.openshift.github.io/ep-url":      params.EPUrl,
 				"app-platform-shift.openshift.github.io/base-branch": params.BaseBranch,
+				"app-platform-shift.openshift.github.io/jira-ticket": params.JiraTicket,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -117,6 +106,8 @@ func (c *K8sClient) CreateWorkflowJob(ctx context.Context, jobID string, params 
 								{Name: "EP_URL", Value: params.EPUrl},
 								{Name: "REPO_URL", Value: params.RepoURL},
 								{Name: "BASE_BRANCH", Value: params.BaseBranch},
+								{Name: "JIRA_TICKET", Value: params.JiraTicket},
+								{Name: "WORKFLOW_MODE", Value: params.WorkflowMode},
 								{Name: "PYTHONUNBUFFERED", Value: "1"},
 								{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/secrets/gcloud/application_default_credentials.json"},
 							},
@@ -193,72 +184,25 @@ func (c *K8sClient) CreateWorkflowJob(ctx context.Context, jobID string, params 
 	return nil
 }
 
-// JobStatus represents the current state of a workflow job.
-type JobStatus struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
-}
-
-// GetJobStatus returns the status of a workflow K8s Job.
-func (c *K8sClient) GetJobStatus(ctx context.Context, jobID string) (*JobStatus, error) {
+func (c *K8sBackend) GetWorkflowStatus(ctx context.Context, jobID string) (*JobStatus, error) {
 	jobName := "shift-workflow-" + jobID
 	job, err := c.clientset.BatchV1().Jobs(c.namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("getting job %s: %w", jobName, err)
 	}
-
-	for _, cond := range job.Status.Conditions {
-		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
-			return &JobStatus{Status: "succeeded"}, nil
-		}
-		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-			return &JobStatus{Status: "failed", Message: cond.Message}, nil
-		}
-	}
-
-	if job.Status.Active > 0 {
-		return &JobStatus{Status: "running"}, nil
-	}
-
-	return &JobStatus{Status: "pending"}, nil
+	return jobStatusFromConditions(job), nil
 }
 
-// GetJobPod returns the name of the pod created by a workflow Job.
-func (c *K8sClient) GetJobPod(ctx context.Context, jobID string) (string, error) {
+func (c *K8sBackend) GetWorkflowInfo(ctx context.Context, jobID string) (*JobInfo, error) {
 	jobName := "shift-workflow-" + jobID
-	pods, err := c.clientset.CoreV1().Pods(c.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "job-name=" + jobName,
-	})
+	job, err := c.clientset.BatchV1().Jobs(c.namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("listing pods for job %s: %w", jobName, err)
+		return nil, fmt.Errorf("getting job %s: %w", jobName, err)
 	}
-	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no pods found for job %s", jobName)
-	}
-	return pods.Items[0].Name, nil
+	return jobInfoFromK8s(jobID, job), nil
 }
 
-// StreamPodLogs returns a streaming reader of pod logs.
-func (c *K8sClient) StreamPodLogs(ctx context.Context, podName string, follow bool) (io.ReadCloser, error) {
-	req := c.clientset.CoreV1().Pods(c.namespace).GetLogs(podName, &corev1.PodLogOptions{
-		Follow: follow,
-	})
-	return req.Stream(ctx)
-}
-
-// JobInfo contains extended job information from K8s.
-type JobInfo struct {
-	ID         string
-	Status     string
-	Message    string
-	CreatedAt  string
-	RepoURL    string
-	EPUrl      string
-	BaseBranch string
-}
-
-// ListJobs returns all workflow jobs with app=shift-worker label.
-func (c *K8sClient) ListJobs(ctx context.Context) ([]JobInfo, error) {
+func (c *K8sBackend) ListWorkflows(ctx context.Context) ([]JobInfo, error) {
 	jobs, err := c.clientset.BatchV1().Jobs(c.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "app=shift-worker",
 	})
@@ -272,84 +216,171 @@ func (c *K8sClient) ListJobs(ctx context.Context) ([]JobInfo, error) {
 		if jobID == "" {
 			continue
 		}
-
-		info := JobInfo{
-			ID:        jobID,
-			CreatedAt: job.CreationTimestamp.Format("2006-01-02T15:04:05Z"),
-		}
-
-		// Determine status.
-		for _, cond := range job.Status.Conditions {
-			if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
-				info.Status = "succeeded"
-				break
-			}
-			if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-				info.Status = "failed"
-				info.Message = cond.Message
-				break
-			}
-		}
-		if info.Status == "" {
-			if job.Status.Active > 0 {
-				info.Status = "running"
-			} else {
-				info.Status = "pending"
-			}
-		}
-
-		// Extract metadata from annotations.
-		if job.Annotations != nil {
-			info.RepoURL = job.Annotations["app-platform-shift.openshift.github.io/repo-url"]
-			info.EPUrl = job.Annotations["app-platform-shift.openshift.github.io/ep-url"]
-			info.BaseBranch = job.Annotations["app-platform-shift.openshift.github.io/base-branch"]
-		}
-
-		result = append(result, info)
+		result = append(result, *jobInfoFromK8s(jobID, &job))
 	}
-
 	return result, nil
 }
 
-// GetJobInfo returns extended information for a single job.
-func (c *K8sClient) GetJobInfo(ctx context.Context, jobID string) (*JobInfo, error) {
-	jobName := "shift-workflow-" + jobID
-	job, err := c.clientset.BatchV1().Jobs(c.namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("getting job %s: %w", jobName, err)
+// StreamLogs waits for the worker pod, streams its logs as SSE events,
+// and sends a final complete event.
+func (c *K8sBackend) StreamLogs(ctx context.Context, id string, w http.ResponseWriter, flusher http.Flusher) error {
+	// Phase 1: wait for pod (up to 5 minutes).
+	var podName string
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		if time.Now().After(deadline) {
+			fmt.Fprintf(w, "event: complete\ndata: %s\n\n",
+				`{"status":"failed","message":"timed out waiting for pod"}`)
+			flusher.Flush()
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		name, err := c.getJobPod(ctx, id)
+		if err == nil {
+			podName = name
+			break
+		}
+
+		fmt.Fprintf(w, "event: status\ndata: %s\n\n", `{"status":"waiting_for_pod"}`)
+		flusher.Flush()
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+		}
 	}
 
+	// Phase 2: wait for pod to be running or terminated.
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		pod, err := c.clientset.CoreV1().Pods(c.namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			fmt.Fprintf(w, "event: status\ndata: %s\n\n", `{"status":"waiting_for_pod"}`)
+			flusher.Flush()
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		phase := pod.Status.Phase
+		if phase == corev1.PodRunning || phase == corev1.PodSucceeded || phase == corev1.PodFailed {
+			break
+		}
+
+		fmt.Fprintf(w, "event: status\ndata: %s\n\n",
+			fmt.Sprintf(`{"status":"pod_%s"}`, string(phase)))
+		flusher.Flush()
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	// Phase 3: stream pod logs.
+	logStream, err := c.streamPodLogs(ctx, podName, true)
+	if err != nil {
+		log.Printf("ERROR: streaming logs for pod %s: %v", podName, err)
+		fmt.Fprintf(w, "event: complete\ndata: %s\n\n",
+			`{"status":"failed","message":"failed to stream logs"}`)
+		flusher.Flush()
+		return nil
+	}
+	defer logStream.Close()
+
+	scanner := bufio.NewScanner(logStream)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+		line := scanner.Text()
+		fmt.Fprintf(w, "event: log\ndata: %s\n\n", escapeSSE(line))
+		flusher.Flush()
+	}
+
+	// Phase 4: send final status.
+	status, err := c.GetWorkflowStatus(ctx, id)
+	if err != nil {
+		fmt.Fprintf(w, "event: complete\ndata: %s\n\n",
+			`{"status":"unknown","message":"could not determine final status"}`)
+	} else {
+		data, _ := json.Marshal(status)
+		fmt.Fprintf(w, "event: complete\ndata: %s\n\n", data)
+	}
+	flusher.Flush()
+	return nil
+}
+
+// --- internal helpers ---
+
+func (c *K8sBackend) getJobPod(ctx context.Context, jobID string) (string, error) {
+	jobName := "shift-workflow-" + jobID
+	pods, err := c.clientset.CoreV1().Pods(c.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "job-name=" + jobName,
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing pods for job %s: %w", jobName, err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no pods found for job %s", jobName)
+	}
+	return pods.Items[0].Name, nil
+}
+
+func (c *K8sBackend) streamPodLogs(ctx context.Context, podName string, follow bool) (io.ReadCloser, error) {
+	req := c.clientset.CoreV1().Pods(c.namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Follow: follow,
+	})
+	return req.Stream(ctx)
+}
+
+func jobStatusFromConditions(job *batchv1.Job) *JobStatus {
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return &JobStatus{Status: "succeeded"}
+		}
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			return &JobStatus{Status: "failed", Message: cond.Message}
+		}
+	}
+	if job.Status.Active > 0 {
+		return &JobStatus{Status: "running"}
+	}
+	return &JobStatus{Status: "pending"}
+}
+
+func jobInfoFromK8s(jobID string, job *batchv1.Job) *JobInfo {
 	info := &JobInfo{
 		ID:        jobID,
 		CreatedAt: job.CreationTimestamp.Format("2006-01-02T15:04:05Z"),
 	}
 
-	// Determine status.
-	for _, cond := range job.Status.Conditions {
-		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
-			info.Status = "succeeded"
-			break
-		}
-		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-			info.Status = "failed"
-			info.Message = cond.Message
-			break
-		}
-	}
-	if info.Status == "" {
-		if job.Status.Active > 0 {
-			info.Status = "running"
-		} else {
-			info.Status = "pending"
-		}
-	}
+	st := jobStatusFromConditions(job)
+	info.Status = st.Status
+	info.Message = st.Message
 
-	// Extract metadata from annotations.
 	if job.Annotations != nil {
 		info.RepoURL = job.Annotations["app-platform-shift.openshift.github.io/repo-url"]
 		info.EPUrl = job.Annotations["app-platform-shift.openshift.github.io/ep-url"]
 		info.BaseBranch = job.Annotations["app-platform-shift.openshift.github.io/base-branch"]
+		info.JiraTicket = job.Annotations["app-platform-shift.openshift.github.io/jira-ticket"]
 	}
 
-	return info, nil
+	return info
 }

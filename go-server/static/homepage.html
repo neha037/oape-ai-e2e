@@ -13,9 +13,9 @@
   h1 { font-size: 1.4rem; margin-bottom: 4px; }
   p.sub { color: #666; font-size: .9rem; margin-bottom: 24px; }
   label { display: block; font-weight: 600; margin-bottom: 6px; font-size: .9rem; }
-  input[type=text], select { width: 100%; padding: 10px 12px; border: 1px solid #ccc;
+  input[type=text], input[type=password], select { width: 100%; padding: 10px 12px; border: 1px solid #ccc;
                    border-radius: 6px; font-size: .95rem; }
-  input[type=text]:focus, select:focus { outline: none; border-color: #4a90d9; }
+  input[type=text]:focus, input[type=password]:focus, select:focus { outline: none; border-color: #4a90d9; }
   button { margin-top: 16px; padding: 10px 24px; background: #4a90d9; color: #fff;
            border: none; border-radius: 6px; font-size: .95rem; cursor: pointer; }
   button:disabled { background: #aaa; cursor: not-allowed; }
@@ -40,19 +40,30 @@
   .result-success { margin-top: 16px; background: #E8F5E9; border: 1px solid #C8E6C9;
                     border-radius: 6px; padding: 12px 16px; font-size: .85rem;
                     color: #2E7D32; display: none; }
+  .result-success a { color: #1B5E20; }
+  .result-success ul { margin: 8px 0 0 0; padding-left: 20px; }
   .result-failed { margin-top: 16px; background: #FFEBEE; border: 1px solid #FFCDD2;
                    border-radius: 6px; padding: 12px 16px; font-size: .85rem;
                    color: #C62828; display: none; }
+  .job-id { font-family: monospace; background: #f0f0f0; padding: 2px 6px;
+            border-radius: 3px; font-size: .85rem; }
+  .input-section { border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px;
+                   margin-bottom: 14px; background: #fafafa; }
+  .input-section-title { font-weight: 600; font-size: .9rem; margin-bottom: 12px;
+                         color: #333; }
+  .or-divider { text-align: center; font-size: .85rem; color: #999; margin: 8px 0;
+                font-weight: 600; text-transform: uppercase; }
+  .optional-tag { font-weight: 400; color: #999; font-size: .8rem; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>OAPE Operator Feature Developer</h1>
-  <p class="sub">Generate complete operator implementation from an OpenShift Enhancement Proposal</p>
+  <p class="sub">Generate complete operator implementation from an Enhancement Proposal or Jira ticket</p>
 
-  <div class="workflow-info">
+  <div class="workflow-info" id="workflowOverview">
     <h3>Workflow Overview</h3>
-    <ul>
+    <ul id="workflowSteps">
       <li><strong>PR #1:</strong> API Types - init, api-generate, api-generate-tests, review</li>
       <li><strong>PR #2:</strong> Controller - api-implement, review</li>
       <li><strong>PR #3:</strong> E2E Tests - e2e-generate, review</li>
@@ -76,10 +87,40 @@
     </div>
 
     <div class="field-group">
-      <label for="ep_url">Enhancement Proposal PR URL</label>
-      <input type="text" id="ep_url" name="ep_url"
-             placeholder="https://github.com/openshift/enhancements/pull/1234" required>
-      <div class="field-hint">The enhancement proposal that describes the feature</div>
+      <label for="workflow_mode">Workflow Mode</label>
+      <select id="workflow_mode" name="workflow_mode">
+        <option value="full">Full Feature (3 PRs: API Types + Controller + E2E)</option>
+        <option value="feature">Feature (2 PRs: API Types + Controller/E2E)</option>
+        <option value="bugfix">Bug Fix (1 PR: Fix + E2E)</option>
+      </select>
+      <div class="field-hint">Controls how the work is split across pull requests</div>
+    </div>
+
+    <div class="input-section">
+      <div class="input-section-title">Input Source <span class="optional-tag">(provide at least one)</span></div>
+
+      <div class="field-group">
+        <label for="ep_url">Enhancement Proposal PR URL</label>
+        <input type="text" id="ep_url" name="ep_url"
+               placeholder="https://github.com/openshift/enhancements/pull/1234">
+        <div class="field-hint">The enhancement proposal that describes the feature</div>
+      </div>
+
+      <div class="or-divider">and / or</div>
+
+      <div class="field-group">
+        <label for="jira_ticket">Jira Ticket</label>
+        <input type="text" id="jira_ticket" name="jira_ticket"
+               placeholder="e.g. OCPBUGS-12345, RFE-5678">
+        <div class="field-hint">Jira ticket key — used for requirements analysis and code review validation</div>
+      </div>
+
+      <div class="field-group" id="jiraTokenGroup" style="display:none;">
+        <label for="jira_token">Jira Personal Access Token</label>
+        <input type="password" id="jira_token" name="jira_token"
+               placeholder="Paste your Jira PAT here">
+        <div class="field-hint">Required when using a Jira ticket. <a href="https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens" target="_blank">Get a token</a></div>
+      </div>
     </div>
 
     <button type="submit" id="submitBtn">Start Workflow</button>
@@ -98,8 +139,39 @@ const logEl       = document.getElementById('logOutput');
 const successEl   = document.getElementById('resultSuccess');
 const failedEl    = document.getElementById('resultFailed');
 const repoSelect  = document.getElementById('repo');
+const branchInput = document.getElementById('base_branch');
+const jiraInput   = document.getElementById('jira_ticket');
+const jiraTokenInput = document.getElementById('jira_token');
+const jiraTokenGroup = document.getElementById('jiraTokenGroup');
+const modeSelect  = document.getElementById('workflow_mode');
+const stepsEl     = document.getElementById('workflowSteps');
 
-// Fetch available repositories on page load, grouped by product
+const repoMeta = {};
+
+const overviewByMode = {
+  full: [
+    '<strong>PR #1:</strong> API Types - init, api-generate, api-generate-tests, review',
+    '<strong>PR #2:</strong> Controller - api-implement, review',
+    '<strong>PR #3:</strong> E2E Tests - e2e-generate, review'
+  ],
+  feature: [
+    '<strong>PR #1:</strong> API Types + Integration Tests',
+    '<strong>PR #2:</strong> Controller Implementation + E2E Tests'
+  ],
+  bugfix: [
+    '<strong>PR #1:</strong> Bug Fix + E2E Tests (all in one PR)'
+  ]
+};
+
+modeSelect.addEventListener('change', () => {
+  const items = overviewByMode[modeSelect.value] || overviewByMode.full;
+  stepsEl.innerHTML = items.map(s => '<li>' + s + '</li>').join('');
+});
+
+jiraInput.addEventListener('input', () => {
+  jiraTokenGroup.style.display = jiraInput.value.trim() ? 'block' : 'none';
+});
+
 async function loadRepos() {
   try {
     const res = await fetch('/api/v1/repos');
@@ -107,6 +179,7 @@ async function loadRepos() {
       const data = await res.json();
       const groups = {};
       data.items.forEach(repo => {
+        repoMeta[repo.url] = repo;
         if (!groups[repo.product]) groups[repo.product] = [];
         groups[repo.product].push(repo);
       });
@@ -116,7 +189,7 @@ async function loadRepos() {
         repos.forEach(repo => {
           const option = document.createElement('option');
           option.value = repo.url;
-          option.textContent = `${repo.url} — ${repo.role}`;
+          option.textContent = repo.url + ' \u2014 ' + repo.role;
           optgroup.appendChild(option);
         });
         repoSelect.appendChild(optgroup);
@@ -128,6 +201,13 @@ async function loadRepos() {
 }
 loadRepos();
 
+repoSelect.addEventListener('change', () => {
+  const meta = repoMeta[repoSelect.value];
+  if (meta && meta.baseBranch) {
+    branchInput.value = meta.baseBranch;
+  }
+});
+
 function escapeHtml(text) {
   const d = document.createElement('div');
   d.textContent = text;
@@ -138,9 +218,19 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const epUrl = document.getElementById('ep_url').value.trim();
   const repo  = document.getElementById('repo').value;
-  const baseBranch = document.getElementById('base_branch').value.trim();
+  const baseBranch = branchInput.value.trim();
+  const jiraTicket = jiraInput.value.trim();
+  const jiraToken  = jiraTokenInput.value.trim();
 
-  if (!epUrl || !repo || !baseBranch) return;
+  if (!repo || !baseBranch) return;
+  if (!epUrl && !jiraTicket) {
+    statusEl.innerHTML = '<span class="error">Please provide an EP URL, a Jira ticket, or both.</span>';
+    return;
+  }
+  if (jiraTicket && !jiraToken) {
+    statusEl.innerHTML = '<span class="error">Jira Personal Access Token is required when using a Jira ticket.</span>';
+    return;
+  }
 
   btn.disabled = true;
   logEl.style.display = 'none';
@@ -150,16 +240,18 @@ form.addEventListener('submit', async (e) => {
   statusEl.innerHTML = '<span class="spinner"></span> Submitting workflow job\u2026';
 
   try {
-    const body = JSON.stringify({ep_url: epUrl, repo_url: repo, base_branch: baseBranch});
+    const payload = {repo_url: repo, base_branch: baseBranch, workflow_mode: modeSelect.value};
+    if (epUrl) payload.ep_url = epUrl;
+    if (jiraTicket) { payload.jira_ticket = jiraTicket; payload.jira_token = jiraToken; }
     const res = await fetch('/api/v1/workflows', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body
+      body: JSON.stringify(payload)
     });
     if (!res.ok) { throw new Error((await res.json()).detail || res.statusText); }
-    const {job_id} = await res.json();
-    statusEl.innerHTML = '<span class="spinner"></span> Connecting to log stream\u2026';
-    streamJob(job_id);
+    const {id: jobId} = await res.json();
+    statusEl.innerHTML = '<span class="spinner"></span> Connecting to log stream\u2026 <span class="job-id">Job: ' + escapeHtml(jobId) + '</span>';
+    streamJob(jobId);
   } catch (err) {
     statusEl.innerHTML = '<span class="error">Error: ' + escapeHtml(err.message) + '</span>';
     btn.disabled = false;
@@ -167,20 +259,34 @@ form.addEventListener('submit', async (e) => {
 });
 
 function streamJob(jobId) {
-  const es = new EventSource('/api/v1/workflows/' + jobId + '/stream');
+  const es = new EventSource('/api/v1/workflows/' + jobId + '/log');
+  const prLinks = [];
+  let costInfo = '';
+  let failMsg = '';
 
   es.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     const s = data.status || 'unknown';
     const label = s.replace(/_/g, ' ');
-    statusEl.innerHTML = '<span class="spinner"></span> ' + escapeHtml(label) + '\u2026';
+    statusEl.innerHTML = '<span class="spinner"></span> ' + escapeHtml(label) + '\u2026 <span class="job-id">Job: ' + escapeHtml(jobId) + '</span>';
   });
 
   es.addEventListener('log', (e) => {
     logEl.style.display = 'block';
     logEl.textContent += e.data + '\n';
     logEl.scrollTop = logEl.scrollHeight;
-    // Update status with latest log line (truncated)
+
+    if (e.data.startsWith('PR_CREATED:')) {
+      prLinks.push(e.data.replace('PR_CREATED:', '').trim());
+    }
+    if (e.data.startsWith('WORKFLOW_SUCCESS')) {
+      const m = e.data.match(/cost=\$?([\d.]+)/);
+      if (m) costInfo = m[1];
+    }
+    if (e.data.startsWith('WORKFLOW_FAILED:')) {
+      failMsg = e.data.replace('WORKFLOW_FAILED:', '').trim();
+    }
+
     const line = e.data.length > 120 ? e.data.substring(0, 120) + '\u2026' : e.data;
     statusEl.innerHTML = '<span class="spinner"></span> ' + escapeHtml(line);
   });
@@ -192,10 +298,21 @@ function streamJob(jobId) {
 
     if (result.status === 'succeeded') {
       statusEl.innerHTML = 'Workflow completed successfully.';
-      successEl.textContent = 'Job finished successfully.';
+      let html = '<strong>Workflow finished successfully.</strong>';
+      if (prLinks.length > 0) {
+        html += '<ul>';
+        prLinks.forEach(url => {
+          html += '<li><a href="' + escapeHtml(url) + '" target="_blank">' + escapeHtml(url) + '</a></li>';
+        });
+        html += '</ul>';
+      }
+      if (costInfo) {
+        html += '<p>Cost: $' + escapeHtml(costInfo) + '</p>';
+      }
+      successEl.innerHTML = html;
       successEl.style.display = 'block';
     } else {
-      const msg = result.message || 'unknown error';
+      const msg = failMsg || result.message || 'unknown error';
       statusEl.innerHTML = '<span class="error">Workflow failed.</span>';
       failedEl.textContent = 'Job failed: ' + msg;
       failedEl.style.display = 'block';
