@@ -45,7 +45,8 @@ _cleanup_on_crash() {
   local exit_code=$?
   if [[ $exit_code -ne 0 && -n "$CURRENT_PR_URL" && "$DRY_RUN" != "true" ]]; then
     local marker="<!-- oape-pr-agent-report -->"
-    local body="${marker}
+    local body
+    body="${marker}
 ## PR Agent Report
 
 **Status:** Agent encountered an error (exit code ${exit_code}).
@@ -163,7 +164,7 @@ validate_repo_allowed() {
 # ===========================================================================
 discover_oape_prs() {
   echo "[discovery] Scanning repos for open PRs..."
-  > "$PR_LIST_FILE"
+  true > "$PR_LIST_FILE"
 
   local repo_count=0
   local pr_count=0
