@@ -1795,21 +1795,53 @@ Prow/GHA job finishes → GitHub fires status event
 
 **Scope**: Report-only CI monitoring via a GHA workflow in each target repo. First target repo: must-gather-operator. The workflow uses GitHub `status` event triggers with a gate step that exits in seconds if checks are still pending — no idle polling or wasted runner minutes. Once all checks are terminal, it clones oape-ai-e2e and runs `monitor.sh` (with `SKIP_POLL=true`) which fetches `gh pr checks`, collects `build-log.txt` from GCS for failed Prow jobs, classifies failures into categories (`install-failure`, `test-failure`, `build-failure`, `lint-failure`, `infra-flake`, `unknown`), queries Sippy for flake history, and posts a structured markdown report on the PR. A machine-readable JSON result (`ci-monitor-result.json`) includes suggested trigger actions (retest, auto-fix-lint, investigate). `dispatch.sh` reads this result and logs planned actions — in Phase 1 these are no-ops, in Phase 2+ they become real invocations of oape-ai-e2e tools.
 
+**Phase 1 enhancements (from PR #60 analysis):**
+- **Release repo discovery**: `monitor.sh` fetches the ci-operator config from `openshift/release` for the target repo/branch, providing authoritative job metadata (required/optional, cluster_profile, OCP release version). Falls back to name-based heuristics if unavailable.
+- **Non-test context exclusions**: Filters out non-CI contexts (`tide`, `Mergeable`, `DCO`, `CodeRabbit`, `stale`, `sonarcloud`, `codecov`) that should never be counted as failures.
+- **Expanded failure patterns**: Infra-flake detection includes `registry.ci.openshift.org` errors, `etcdserver` timeouts, lease failures, cloud quota errors, `dial tcp` timeouts. Install-failure detection includes `level=fatal.*installer`, `bootstrapComplete` waits.
+- **Dynamic Sippy release version**: Resolves OCP version from ci-operator config (`releases.latest.release.version`) or Prow job name pattern, providing accurate flake data per release.
+- **Prow Job Breakdown table**: Report includes a table of ALL checks (pass/fail) with state, category, required/optional status, flake%, and recommended action.
+
 **Retained for future phases**: The PR agent scripts (`scripts/pr-agent/entrypoint.sh`, `safety.sh`) are retained as the foundation for `dispatch.sh` to invoke in Phase 2+. Since the workflow clones the full oape-ai-e2e repo, all tools are available at runtime.
 
 ### Phase 2: Auto-Fix + Claude Intelligence
 
-**Goal**: Add CI-triggered auto-fix for trivial failures, Claude-powered analysis for unknown failures, and auto-retest for confirmed flakes. The CI monitor's `trigger_actions` output from Phase 1 drives dispatch.
+**Goal**: Add CI-triggered auto-fix for trivial failures, Claude-powered analysis for unknown failures, and auto-retest for confirmed flakes. The CI monitor's `trigger_actions` output from Phase 1 drives dispatch. Incorporate context-aware analysis patterns from PR #60's ci-monitor skill.
 
 | File                                               | Purpose                                                                                                 | Maps to Subtasks |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------- |
 | `.github/workflows/ci-monitor-dispatch.yml`        | GHA workflow triggered by ci-monitor result: dispatches auto-fix, retest, or Claude analysis            | 0 (partial)      |
 | `scripts/pr-agent/auto-fix.sh`                     | Extracted auto-fix engine: `go fmt`, `goimports`, `make generate`, scoped to PR-changed files           | 4                |
 | `scripts/pr-agent/log-analyzer.sh`                 | Deterministic + Claude fallback classification for `unknown` failures                                   | 3                |
-| `plugins/oape/skills/ci-failure-analysis/SKILL.md` | Claude skill for unknown failure classification                                                         | 3                |
+| `plugins/oape/skills/ci-failure-analysis/SKILL.md` | Claude skill for unknown failure classification (reference: PR #60's `plugins/oape/skills/ci-monitor/SKILL.md`) | 3                |
 | `scripts/pr-agent/safety.sh`                       | Retained guardrails: blocklist, audit log, commit limits, diff size guard                               | 7                |
 
 **Scope adds**: Auto-fix for `lint-failure` and `build-failure` categories, auto-retest (`/retest`) for `infra-flake`, Claude Code CLI fallback for `unknown` failures, dispatch workflow that reads `ci-monitor-result.json` and takes action.
+
+**Learnings from PR #60 to incorporate in Phase 2:**
+
+- **Auto-retest protocol**: When ALL failures on a PR are infra-flake (Mode E), `dispatch.sh` posts `/retest` automatically (max 2 per session). Only triggers when every failure is infrastructure-related. Disable with `--no-auto-retest`. Each auto-retest is logged in the report with timestamp, affected contexts, and outcome.
+
+- **On-demand PR diff fetch**: When a build/test failure references a specific file, fetch the diff for that file only (`gh pr diff $PR -- $FILE`) to correlate the error with the actual code change. Only fetch for files in `PR_CHANGED_FILES` — if the error is in a file not changed by the PR, flag it as a dependency or generated-code issue.
+
+- **Error signature hashing**: Normalize error messages (strip timestamps, line numbers, hex addresses `0x[a-f0-9]+`, UUIDs `[a-f0-9-]{36}`, temp paths `/tmp/[^ ]+`), then SHA-256 hash. Track `context_name -> error_hash` per fix round. If >= 75% of failed contexts share the same hash as the previous round, the fix was ineffective — stop the fix loop.
+
+- **Root cause tracing protocol**: Step-by-step diagnostic decision tree for each failure:
+  1. Does the error reference a specific file? Is it in `PR_CHANGED_FILES`? → PR likely introduced the issue.
+  2. Is it about a missing tool, command, or image? → Check ci-operator config's `container.from` or step `from:` image.
+  3. Is it about authentication/credentials? → Check ci-operator `credentials` entries (Vault-injected, declared in `openshift/release`).
+  4. Is it transient/environmental (network, quota, lease)? → Recommend `/retest`.
+  5. Is it about missing generated code (`zz_generated.deepcopy.go`, CRD YAML)? → Check if `_types.go` changed but generated files weren't updated.
+  6. None of the above → Report with all available evidence, confidence: low.
+  Each step cites concrete artifacts (log line, file path, config entry). Output format: numbered trace steps, fix location, fix owner, confidence level.
+
+- **PR change context**: Fetch changed files list per PR (`gh pr view --json files`). Classify change types: API (`_types.go`), controller (`controller|reconcil*.go`), test (`_test.go`), CRD (`crd/*.yaml`), RBAC (`rbac*.yaml`). Used for error-to-file correlation and stage-aware summary.
+
+- **Operator repo context**: Detect operator framework from `go.mod` (`sigs.k8s.io/controller-runtime` vs `github.com/openshift/library-go`). Detect Makefile presence, test directories. Used for targeted fix suggestions and local verification commands.
+
+- **Step registry resolution**: For failed Prow jobs with multi-stage steps, resolve step refs from `openshift/release` step registry (`ci-operator/step-registry/`). Maps "e2e-aws failed" to "step `openshift-e2e-test` failed, running `openshift-tests run openshift/conformance/parallel`". Resolved on demand only for failed jobs (saves API calls).
+
+- **Optional job severity**: Jobs marked `optional: true` in ci-operator config should never be labeled as "Blocker" or "Critical". Label as "Non-blocking (optional)" regardless of failure mode. Optional job failures should not change the PR's overall verdict from PASS to FAIL.
 
 ### Phase 3: Review Comments + Full Design
 

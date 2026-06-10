@@ -44,6 +44,10 @@ RESULT_FILE="${RESULT_FILE:-/tmp/ci-monitor-result.json}"
 WORK_DIR="${WORK_DIR:-/tmp/ci-monitor}"
 REPORT_MARKER="<!-- oape-ci-monitor -->"
 
+# Release repo context (populated by fetch_release_context)
+USE_RELEASE_CONTEXT="false"
+RELEASE_VERSION=""
+
 # Parsed from PR_URL
 OWNER=""
 REPO=""
@@ -120,6 +124,94 @@ run_prechecks() {
 }
 
 # ===========================================================================
+# Phase 0: Fetch release repo context (ci-operator config from openshift/release)
+# ===========================================================================
+fetch_release_context() {
+  echo "[release-ctx] Fetching ci-operator config for ${OWNER}/${REPO}..."
+
+  local base_branch
+  base_branch=$(gh pr view "$PR_NUMBER" --repo "${OWNER}/${REPO}" \
+    --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+
+  if [[ -z "$base_branch" ]]; then
+    echo "[release-ctx] Could not determine base branch, skipping release context"
+    return 0
+  fi
+
+  local config_base="https://raw.githubusercontent.com/openshift/release/master/ci-operator/config/${OWNER}/${REPO}"
+  local config_file="${OWNER}-${REPO}-${base_branch}.yaml"
+  local local_config="${WORK_DIR}/ci-operator-config.yaml"
+
+  if ! curl -sf --max-time 15 "${config_base}/${config_file}" -o "$local_config" 2>/dev/null; then
+    config_file="${OWNER}-${REPO}-master.yaml"
+    if ! curl -sf --max-time 15 "${config_base}/${config_file}" -o "$local_config" 2>/dev/null; then
+      echo "[release-ctx] No ci-operator config found for ${OWNER}/${REPO}. Using name-based classification."
+      return 0
+    fi
+  fi
+
+  if [[ ! -s "$local_config" ]]; then
+    echo "[release-ctx] Config file empty, skipping"
+    return 0
+  fi
+
+  USE_RELEASE_CONTEXT="true"
+  echo "[release-ctx] Config fetched: ${config_file}"
+
+  # Extract OCP release version for Sippy queries
+  # Try releases.latest.release.version, then releases.latest.integration.name
+  if command -v python3 &>/dev/null; then
+    RELEASE_VERSION=$(python3 -c "
+import yaml, sys
+try:
+    cfg = yaml.safe_load(open('$local_config'))
+    rels = cfg.get('releases', {}).get('latest', {})
+    ver = rels.get('release', {}).get('version', '')
+    if not ver:
+        ver = rels.get('integration', {}).get('name', '')
+    print(ver)
+except:
+    print('')
+" 2>/dev/null || echo "")
+  fi
+
+  if [[ -n "$RELEASE_VERSION" ]]; then
+    echo "[release-ctx] OCP release version: ${RELEASE_VERSION}"
+  fi
+
+  # Build job manifest: tests[].as -> {optional, cluster_profile}
+  if command -v python3 &>/dev/null; then
+    python3 -c "
+import yaml, json, sys
+try:
+    cfg = yaml.safe_load(open('$local_config'))
+    manifest = {}
+    for test in cfg.get('tests', []):
+        name = test.get('as', '')
+        if not name:
+            continue
+        entry = {
+            'optional': test.get('optional', False),
+            'always_run': test.get('always_run', True),
+            'cluster_profile': '',
+        }
+        steps = test.get('steps', {})
+        if isinstance(steps, dict):
+            entry['cluster_profile'] = steps.get('cluster_profile', '')
+        manifest[name] = entry
+    json.dump(manifest, open('${WORK_DIR}/job-manifest.json', 'w'), indent=2)
+    print(f'[release-ctx] Job manifest: {len(manifest)} jobs parsed')
+except Exception as e:
+    print(f'[release-ctx] Warning: could not parse job manifest: {e}', file=sys.stderr)
+    json.dump({}, open('${WORK_DIR}/job-manifest.json', 'w'))
+" 2>/dev/null || echo '{}' > "${WORK_DIR}/job-manifest.json"
+  else
+    echo '{}' > "${WORK_DIR}/job-manifest.json"
+    echo "[release-ctx] python3 not available, skipping YAML parsing"
+  fi
+}
+
+# ===========================================================================
 # Phase 1: Poll CI checks until all complete (or timeout)
 # ===========================================================================
 fetch_ci_checks() {
@@ -131,10 +223,14 @@ fetch_ci_checks() {
     echo "[]" > "$output_file"
   fi
 
-  # Filter out self (the ci-monitor job) to avoid circular dependency
+  # Filter out self and non-CI contexts (merge gates, review bots, etc.)
   local filtered
   filtered=$(jq --arg self "$SELF_JOB_NAME" \
-    '[.[] | select(.name != $self and (.name | contains($self) | not))]' \
+    '[.[] | select(
+      .name != $self
+      and (.name | contains($self) | not)
+      and (.name | test("^(tide|Mergeable|DCO|CodeRabbit|stale|sonarcloud|codecov)"; "i") | not)
+    )]' \
     "$output_file")
   echo "$filtered" > "$output_file"
 
@@ -271,22 +367,38 @@ classify_single_failure() {
   content=$(cat "$log_file")
 
   # Install failures (cluster provisioning)
-  if echo "$content" | grep -qiE 'failed to install|cluster installation failed|install.*timed out|waiting for bootstrap|failed to create cluster'; then
+  if echo "$content" | grep -qiE \
+    'failed to install|cluster installation failed|install.*timed out|'\
+    'waiting for bootstrap|failed to create cluster|'\
+    'level=fatal.*installer|cluster creation failed|bootstrap.*timed out|'\
+    'waiting for bootstrapComplete'; then
     echo "install-failure"
-  # Build failures
-  elif echo "$content" | grep -qiE 'cannot compile|undefined:|syntax error|cannot use.*as.*in|build.*failed|compilation error'; then
+  # Build / compile failures
+  elif echo "$content" | grep -qiE \
+    'cannot compile|undefined:|syntax error|cannot use.*as.*in|'\
+    'build.*failed|compilation error|cannot find package|imported and not used'; then
     echo "build-failure"
-  # Lint / formatting failures
-  elif echo "$content" | grep -qiE 'gofmt|goimports|formatting differs|golangci-lint|golint|staticcheck|revive|lint.*failed'; then
+  # Lint / formatting / boilerplate failures
+  elif echo "$content" | grep -qiE \
+    'gofmt|goimports|formatting differs|golangci-lint|golint|staticcheck|revive|lint.*failed'; then
     echo "lint-failure"
   # Generated files out of date
-  elif echo "$content" | grep -qiE 'generated code is out of date|make generate|make manifests|deepcopy-gen|zz_generated|boilerplate'; then
+  elif echo "$content" | grep -qiE \
+    'generated code is out of date|make generate|make manifests|deepcopy-gen|zz_generated|boilerplate'; then
     echo "lint-failure"
   # Test failures
-  elif echo "$content" | grep -qiE '--- FAIL|FAIL\s|panic:.*test|assertion failed|test.*failed'; then
+  elif echo "$content" | grep -qiE \
+    '--- FAIL|FAIL\s|panic:.*test|assertion failed|test.*failed'; then
     echo "test-failure"
-  # Infrastructure flakes
-  elif echo "$content" | grep -qiE 'context deadline exceeded|connection refused|i/o timeout|ErrImagePull|ImagePullBackOff|pod sandbox|TLS handshake timeout|quota.*exceeded|unable to provision'; then
+  # Infrastructure / transient flakes
+  elif echo "$content" | grep -qiE \
+    'context deadline exceeded|connection refused|i/o timeout|ErrImagePull|ImagePullBackOff|'\
+    'pod sandbox|TLS handshake timeout|quota.*exceeded|unable to provision|'\
+    'registry\.ci\.openshift\.org.*(timeout|error)|'\
+    'etcdserver: request timed out|lease lost|'\
+    'error creating.*instance|InsufficientInstanceCapacity|'\
+    'unable to get lease|failed to acquire lease|'\
+    'dial tcp.*timeout'; then
     echo "infra-flake"
   else
     echo "unknown"
@@ -347,6 +459,28 @@ classify_all_failures() {
 # ===========================================================================
 # Phase 4: Sippy flake history lookup
 # ===========================================================================
+resolve_release_version() {
+  local job_name="${1:-}"
+
+  # 1. From ci-operator config (set by fetch_release_context)
+  if [[ -n "$RELEASE_VERSION" ]]; then
+    echo "$RELEASE_VERSION"
+    return
+  fi
+
+  # 2. From Prow job name pattern (e.g., "4.18" from "pull-ci-...-4.18-e2e-aws")
+  if [[ -n "$job_name" ]]; then
+    local version
+    version=$(echo "$job_name" | grep -oP '\d+\.\d+' | head -1 || true)
+    if [[ -n "$version" ]]; then
+      echo "$version"
+      return
+    fi
+  fi
+
+  echo ""
+}
+
 query_sippy_flakes() {
   local analysis_file="${WORK_DIR}/failure-analysis.json"
 
@@ -362,12 +496,27 @@ query_sippy_flakes() {
     return 0
   fi
 
+  local resolved_release
+  resolved_release=$(resolve_release_version "")
+  if [[ -n "$resolved_release" ]]; then
+    echo "[sippy] Using OCP release version: ${resolved_release}"
+  else
+    echo "[sippy] No release version resolved, queries may return incomplete data"
+  fi
+
   echo "[sippy] Querying Sippy for flake history..."
 
   while IFS= read -r job_name; do
     [[ -z "$job_name" ]] && continue
 
-    local sippy_url="${SIPPY_API_URL}/api/jobs/flakes?job=${job_name}"
+    local release_for_job
+    release_for_job="${resolved_release:-$(resolve_release_version "$job_name")}"
+    local sippy_url
+    if [[ -n "$release_for_job" ]]; then
+      sippy_url="${SIPPY_API_URL}/api/tests?release=${release_for_job}&filter.test_name=${job_name}"
+    else
+      sippy_url="${SIPPY_API_URL}/api/jobs/flakes?job=${job_name}"
+    fi
     local flake_data
     flake_data=$(curl -sSL --max-time 10 "$sippy_url" 2>/dev/null || echo "{}")
 
@@ -422,6 +571,9 @@ generate_report() {
     echo ""
     echo "**PR:** [${pr_title}](${PR_URL})"
     echo "**Monitored at:** $(date -u +'%Y-%m-%d %H:%M UTC')"
+    if [[ "$USE_RELEASE_CONTEXT" == "true" ]]; then
+      echo "**Release Context:** available | OCP version: ${RELEASE_VERSION:-unknown}"
+    fi
     echo ""
 
     # Overall status
@@ -517,19 +669,55 @@ generate_report() {
       fi
     fi
 
-    # Passed checks (collapsed)
-    if [[ "$passed" -gt 0 ]]; then
-      echo "<details>"
-      echo "<summary>Passed checks (${passed})</summary>"
-      echo ""
-      jq -r '.[] | select(.bucket == "pass") | "- \(.name)"' "$checks_file" 2>/dev/null || true
-      echo ""
-      echo "</details>"
-      echo ""
-    fi
+    # Prow Job Breakdown table (all checks, not just failures)
+    echo "### Prow Job Breakdown"
+    echo ""
+    echo "| Job | State | Category | Required | Flake% | Action |"
+    echo "|-----|-------|----------|----------|--------|--------|"
+
+    local job_manifest="${WORK_DIR}/job-manifest.json"
+
+    jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' "$checks_file" 2>/dev/null \
+      | while IFS=$'\t' read -r jb_name jb_bucket jb_link; do
+          [[ -z "$jb_name" ]] && continue
+          local jb_category="--" jb_required="--" jb_flake="--" jb_action="--"
+
+          # For failed jobs, look up category and flake% from analysis
+          if [[ "$jb_bucket" == "fail" && -f "$analysis_file" ]]; then
+            jb_category=$(jq -r --arg n "$jb_name" '.[] | select(.job_name == $n) | .category // "--"' "$analysis_file" 2>/dev/null || echo "--")
+            local fp
+            fp=$(jq -r --arg n "$jb_name" '.[] | select(.job_name == $n) | .flake_probability // 0' "$analysis_file" 2>/dev/null || echo "0")
+            if [[ "$fp" != "0" && "$fp" != "null" ]]; then
+              jb_flake="${fp}%"
+            fi
+            # Derive action from category
+            case "$jb_category" in
+              infra-flake)     jb_action="/retest" ;;
+              lint-failure)    jb_action="auto-fix" ;;
+              build-failure|test-failure|install-failure) jb_action="investigate" ;;
+              unknown)         jb_action="investigate" ;;
+            esac
+          fi
+
+          # Look up required/optional from job manifest
+          if [[ "$USE_RELEASE_CONTEXT" == "true" && -f "$job_manifest" ]]; then
+            local short_name
+            short_name=$(echo "$jb_name" | sed "s/^pull-ci-${OWNER}-${REPO}-[^-]*-//")
+            local is_optional
+            is_optional=$(jq -r --arg n "$short_name" '.[$n].optional // false' "$job_manifest" 2>/dev/null || echo "false")
+            if [[ "$is_optional" == "true" ]]; then
+              jb_required="no (optional)"
+            else
+              jb_required="yes"
+            fi
+          fi
+
+          echo "| ${jb_name} | ${jb_bucket} | \`${jb_category}\` | ${jb_required} | ${jb_flake} | ${jb_action} |"
+        done
+    echo ""
 
     echo "---"
-    echo "*Generated by oape-ci-monitor on $(date -u +'%Y-%m-%d %H:%M UTC') | classification: deterministic (regex-based)*"
+    echo "*Generated by oape-ci-monitor on $(date -u +'%Y-%m-%d %H:%M UTC') | classification: deterministic (regex-based) | release context: ${USE_RELEASE_CONTEXT}*"
   } > "$report_file"
 
   echo "[report] Report generated: ${report_file}"
@@ -678,6 +866,11 @@ main() {
   echo "[main] Monitoring ${OWNER}/${REPO}#${PR_NUMBER}"
 
   run_prechecks
+
+  # Phase 0: Fetch release repo context
+  echo ""
+  echo "=== Phase 0: Fetch Release Repo Context ==="
+  fetch_release_context
 
   # Phase 1: Wait for CI checks to complete
   echo ""
