@@ -1,20 +1,24 @@
-name: pr-agent-validation
+name: oape-scripts-validation
 
 on:
   push:
     paths:
       - 'scripts/pr-agent/**'
+      - 'scripts/ci-monitor/**'
+      - 'docs/target-repo-ci-monitor.yml'
       - '.github/workflows/pr-agent-test.yml'
       - '.github/workflows/periodic-pr-agent.yml'
   pull_request:
     paths:
       - 'scripts/pr-agent/**'
+      - 'scripts/ci-monitor/**'
+      - 'docs/target-repo-ci-monitor.yml'
       - '.github/workflows/pr-agent-test.yml'
       - '.github/workflows/periodic-pr-agent.yml'
 
 jobs:
   lint:
-    name: Lint PR agent scripts
+    name: Lint OAPE scripts
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -25,19 +29,22 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      - name: Run shellcheck
+      - name: Run shellcheck on pr-agent scripts
         run: shellcheck scripts/pr-agent/*.sh
+
+      - name: Run shellcheck on ci-monitor scripts
+        run: shellcheck scripts/ci-monitor/*.sh
 
       - name: Verify bash syntax
         run: |
-          for script in scripts/pr-agent/*.sh; do
+          for script in scripts/pr-agent/*.sh scripts/ci-monitor/*.sh; do
             echo "Checking syntax: ${script}"
             bash -n "$script"
           done
 
       - name: Verify scripts are executable
         run: |
-          for script in scripts/pr-agent/*.sh; do
+          for script in scripts/pr-agent/*.sh scripts/ci-monitor/*.sh; do
             if [[ ! -x "$script" ]]; then
               echo "ERROR: ${script} is not executable"
               exit 1
@@ -47,7 +54,7 @@ jobs:
 
       - name: Validate workflow YAML syntax
         run: |
-          for wf in .github/workflows/periodic-pr-agent.yml .github/workflows/pr-agent-test.yml; do
+          for wf in .github/workflows/periodic-pr-agent.yml .github/workflows/pr-agent-test.yml docs/target-repo-ci-monitor.yml; do
             if [[ -f "$wf" ]]; then
               echo "Validating: ${wf}"
               python3 -c "import yaml; yaml.safe_load(open('$wf'))"

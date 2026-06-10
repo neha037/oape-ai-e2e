@@ -5,7 +5,7 @@
 **Status:** To Do
 **Assignee:** Neha Kumari
 
-> **Phase 1 Scope Change (2026-06-08):** Phase 1 has been narrowed from a periodic cron sweep of all open PRs with auto-fix to an **event-driven CI monitor** triggered on PR open/push. Phase 1 now runs in `--monitor-only` mode (CI status + deterministic classification + status report, no auto-fix). The workflow triggers via `pull_request: [opened, synchronize]` for PRs on this repo and `workflow_dispatch` with a `pr_url` input for PRs on target repos. The periodic cron sweep and auto-fix engine remain in the code but are gated and will be enabled in Phase 2.
+> **Phase 1 Scope Change (2026-06-10):** Phase 1 is a **GitHub Actions CI monitor** added directly to each target repo. The workflow triggers on GitHub `status` events (fired by Prow on every job completion). Each trigger checks whether all CI checks are done — if not, it exits in seconds with no idle polling. Once all checks are terminal, it clones oape-ai-e2e and runs the analysis scripts to classify failures, query Sippy for flake history, and post a structured report as a PR comment. Phase 1 is **report-only**: no auto-fix, no review comment handling, no Claude dependency. The report includes a machine-readable JSON output with suggested trigger actions for future phases. No container images or Prow configuration required — just a `.yml` workflow file in the target repo.
 
 ## Motivation & Goals
 
@@ -1770,51 +1770,59 @@ The agent maintains lightweight state across runs via the PR report comment (tra
 
 The subtasks above describe the full target architecture (17 files). Implementation is phased to deliver value incrementally and validate the approach before investing in the full design.
 
-### Phase 1: MVP — PR-Open Triggered CI Monitor (Monitor-Only)
+### Phase 1: MVP — GHA CI Monitor in Target Repos (Report-Only)
 
-**Goal**: Prove the concept with event-driven CI monitoring for newly opened PRs. Deterministic-only classification, no auto-fix, no Claude fallback, no review comment handling.
+**Goal**: Prove the concept by adding a GitHub Actions workflow to target repos that monitors CI and reports failures. The workflow triggers on GitHub `status` events — each time a Prow or GHA job completes, the workflow fires, checks if ALL checks are now terminal, and only runs the full analysis once everything is done. No idle polling, no wasted runner minutes. `dispatch.sh` then logs planned next-step actions (no-op in Phase 1, real invocations in Phase 2+). No auto-fix, no review comment handling, no Claude dependency. No container images.
 
-| File                                      | Purpose                                                                                                                                                                          | Maps to Subtasks            |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| `.github/workflows/periodic-pr-agent.yml` | Unified workflow: `pull_request: [opened, synchronize]` + `workflow_dispatch` with `pr_url` input + cron (cron active but unused in Phase 1)                                    | 0, 1 (partial)              |
-| `scripts/pr-agent/entrypoint.sh`          | Main script with inline functions: CI monitoring (using `bucket`), deterministic classification, status report, state persistence. Supports `--monitor-only` flag (skips auto-fix) | 1, 2, 3 (partial), 6, 8    |
-| `scripts/pr-agent/safety.sh`              | Blocklist (extension-aware), audit log, commit limits, diff size guard, retry helper                                                                                             | 7                           |
-| `.github/workflows/pr-agent-test.yml`     | shellcheck + dry-run test                                                                                                                                                        | 9 (partial)                 |
+**Architecture**: Each target repo adds a `.github/workflows/oape-ci-monitor.yml` (copied from `docs/target-repo-ci-monitor.yml`). Triggered by `status` events, the workflow gates on "all checks complete" before cloning oape-ai-e2e and running the analysis. Typical latency: analysis starts within ~30s of the last CI job finishing.
 
-**Scope**: On-demand single-PR mode with `--monitor-only`. Auto-triggers on PR open/push via `pull_request` event; manual trigger via `workflow_dispatch` with `pr_url` for target repo PRs. CI monitoring + deterministic classification + status report only. Auto-fix code exists but is gated behind `--monitor-only` (disabled). Periodic sweep code exists but is not the primary path.
+```
+Prow/GHA job finishes → GitHub fires status event
+  → GHA triggers oape-ci-monitor workflow
+  → Gate step: finds PR for commit, checks if all checks are terminal
+  → If checks still pending → exits in seconds (no work done)
+  → If all complete → clones oape-ai-e2e from GitHub
+  → monitor.sh: polls gh pr checks → collects GCS artifacts → classifies → Sippy → report → result JSON
+  → dispatch.sh: reads result JSON → logs planned actions (Phase 1) / invokes auto-fix, Claude, /retest (Phase 2+)
+```
 
-### Phase 2: Intelligence + On-Demand
+| File                                        | Purpose                                                                                                                                         | Maps to Subtasks  |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `scripts/ci-monitor/monitor.sh`             | CI monitor: polls checks, collects GCS artifacts, classifies failures, queries Sippy, generates report, posts comment, writes result JSON        | 2, 3 (partial)    |
+| `scripts/ci-monitor/dispatch.sh`            | Failure dispatch: reads result JSON, logs planned actions (Phase 1), invokes further oape-ai-e2e tools on failure (Phase 2+)                     | 6 (partial)       |
+| `docs/target-repo-ci-monitor.yml`           | GHA workflow template that target repos copy into `.github/workflows/oape-ci-monitor.yml`                                                       | 0 (partial)       |
+| `.github/workflows/pr-agent-test.yml`       | shellcheck + syntax validation for `scripts/pr-agent/`, `scripts/ci-monitor/`, and the workflow template                                        | 9 (partial)       |
 
-**Goal**: Add Claude-powered analysis and on-demand triggering.
+**Scope**: Report-only CI monitoring via a GHA workflow in each target repo. First target repo: must-gather-operator. The workflow uses GitHub `status` event triggers with a gate step that exits in seconds if checks are still pending — no idle polling or wasted runner minutes. Once all checks are terminal, it clones oape-ai-e2e and runs `monitor.sh` (with `SKIP_POLL=true`) which fetches `gh pr checks`, collects `build-log.txt` from GCS for failed Prow jobs, classifies failures into categories (`install-failure`, `test-failure`, `build-failure`, `lint-failure`, `infra-flake`, `unknown`), queries Sippy for flake history, and posts a structured markdown report on the PR. A machine-readable JSON result (`ci-monitor-result.json`) includes suggested trigger actions (retest, auto-fix-lint, investigate). `dispatch.sh` reads this result and logs planned actions — in Phase 1 these are no-ops, in Phase 2+ they become real invocations of oape-ai-e2e tools.
 
+**Retained for future phases**: The PR agent scripts (`scripts/pr-agent/entrypoint.sh`, `safety.sh`) are retained as the foundation for `dispatch.sh` to invoke in Phase 2+. Since the workflow clones the full oape-ai-e2e repo, all tools are available at runtime.
 
-| File                                               | Purpose                                                  | Maps to Subtasks |
-| -------------------------------------------------- | -------------------------------------------------------- | ---------------- |
-| `.github/workflows/on-demand-pr-agent.yml`         | `workflow_dispatch` + `repository_dispatch`              | 0 (partial)      |
-| `.github/workflows/pr-agent-shared.yml`            | Reusable workflow (extracted from periodic)              | 0 (partial)      |
-| `scripts/pr-agent/ci-monitor.sh`                   | Extracted from entrypoint.sh                             | 2                |
-| `scripts/pr-agent/log-analyzer.sh`                 | Deterministic + Claude fallback classification           | 3                |
-| `scripts/pr-agent/review-handler.sh`               | Review comment handling with restricted `--allowedTools` | 5                |
-| `plugins/oape/skills/ci-failure-analysis/SKILL.md` | Claude skill for unknown failure classification          | 3                |
+### Phase 2: Auto-Fix + Claude Intelligence
 
+**Goal**: Add CI-triggered auto-fix for trivial failures, Claude-powered analysis for unknown failures, and auto-retest for confirmed flakes. The CI monitor's `trigger_actions` output from Phase 1 drives dispatch.
 
-**Scope adds**: Claude Code CLI fallback for `unknown` failures, on-demand mode, review comment monitoring/response, separate scripts extracted from entrypoint.
+| File                                               | Purpose                                                                                                 | Maps to Subtasks |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------- |
+| `.github/workflows/ci-monitor-dispatch.yml`        | GHA workflow triggered by ci-monitor result: dispatches auto-fix, retest, or Claude analysis            | 0 (partial)      |
+| `scripts/pr-agent/auto-fix.sh`                     | Extracted auto-fix engine: `go fmt`, `goimports`, `make generate`, scoped to PR-changed files           | 4                |
+| `scripts/pr-agent/log-analyzer.sh`                 | Deterministic + Claude fallback classification for `unknown` failures                                   | 3                |
+| `plugins/oape/skills/ci-failure-analysis/SKILL.md` | Claude skill for unknown failure classification                                                         | 3                |
+| `scripts/pr-agent/safety.sh`                       | Retained guardrails: blocklist, audit log, commit limits, diff size guard                               | 7                |
 
-### Phase 3: Full Design
+**Scope adds**: Auto-fix for `lint-failure` and `build-failure` categories, auto-retest (`/retest`) for `infra-flake`, Claude Code CLI fallback for `unknown` failures, dispatch workflow that reads `ci-monitor-result.json` and takes action.
 
-**Goal**: Complete the target architecture with target repo triggers and the `/oape:pr-agent` command.
+### Phase 3: Review Comments + Full Design
 
+**Goal**: Complete the target architecture with review comment handling, the `/oape:pr-agent` command, and rollout to all target repos.
 
-| File                                           | Purpose                                                 | Maps to Subtasks |
-| ---------------------------------------------- | ------------------------------------------------------- | ---------------- |
-| `.github/workflows/oape-pr-agent-trigger.yml`  | Target repo trigger template                            | 0 (partial)      |
-| `scripts/pr-agent/auto-fix.sh`                 | Extracted auto-fix logic                                | 4                |
-| `scripts/pr-agent/report.sh`                   | Extracted reporting logic                               | 8                |
-| `plugins/oape/skills/pr-agent-safety/SKILL.md` | Safety rules skill for Claude                           | 7                |
-| `plugins/oape/commands/pr-agent.md`            | `/oape:pr-agent` command for interactive + headless use | 10               |
+| File                                           | Purpose                                                                                    | Maps to Subtasks |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------- |
+| `scripts/pr-agent/review-handler.sh`           | Review comment monitoring/response with restricted `--allowedTools`                         | 5                |
+| `scripts/pr-agent/report.sh`                   | Extracted reporting logic (unified for CI monitor + PR agent)                               | 8                |
+| `plugins/oape/skills/pr-agent-safety/SKILL.md` | Safety rules skill for Claude                                                              | 7                |
+| `plugins/oape/commands/pr-agent.md`            | `/oape:pr-agent` command for interactive + headless use                                    | 10               |
 
-
-**Scope adds**: Target repo trigger workflows for instant CI failure response, `/oape:pr-agent` command, full test suite.
+**Scope adds**: Review comment handling, `/oape:pr-agent` command, rollout of `oape-ci-monitor` to all repos in `team-repos.csv`, full test suite.
 
 ---
 
