@@ -76,19 +76,22 @@ jobs:
 
           pr_number="${MANUAL_PR:-$pr_number}"
 
+          # Exclude self and non-CI contexts (tide stays pending until labels are set)
+          EXCL="(.name != \"${SELF_JOB}\" and (.name | test(\"^(tide|Mergeable|DCO|CodeRabbit|stale|sonarcloud|codecov)\"; \"i\") | not))"
+
           pending=$(gh pr checks "$pr_number" --repo "$REPO" \
             --json name,state \
-            --jq "[.[] | select(.name != \"${SELF_JOB}\" and .state == \"PENDING\")] | length" 2>/dev/null || echo "0")
+            --jq "[.[] | select(${EXCL} and .state == \"PENDING\")] | length" 2>/dev/null || echo "0")
 
           if [[ "$pending" -gt 0 ]]; then
-            echo "${pending} checks still pending for PR #${pr_number}, skipping"
+            echo "${pending} CI checks still pending for PR #${pr_number}, skipping"
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           failed=$(gh pr checks "$pr_number" --repo "$REPO" \
             --json name,bucket \
-            --jq "[.[] | select(.name != \"${SELF_JOB}\" and .bucket == \"fail\")] | length" 2>/dev/null || echo "0")
+            --jq "[.[] | select(${EXCL} and .bucket == \"fail\")] | length" 2>/dev/null || echo "0")
 
           echo "All checks complete for PR #${pr_number}: ${failed} failure(s)"
           echo "ready=true" >> "$GITHUB_OUTPUT"
