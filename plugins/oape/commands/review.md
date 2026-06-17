@@ -36,6 +36,14 @@ The review covers five modules:
 
 ```bash
 BASE_REF="${2:-origin/master}"
+
+# Adjust for fork mode: if upstream remote exists, use it for the base ref
+if git remote get-url upstream &>/dev/null 2>&1; then
+  if [[ "$BASE_REF" == origin/* ]]; then
+    BASE_REF="${BASE_REF/origin/upstream}"
+    echo "Fork detected: adjusted base ref to $BASE_REF"
+  fi
+fi
 ```
 
 ### Step 2: Fetch Context
@@ -126,6 +134,18 @@ Apply **all** of the following review criteria. Modules A–D are **mandatory** 
     - If changed Go files introduce new import paths, verify they exist in `go.mod` (direct or indirect).
     - If a `vendor/` directory exists and `go.mod` is in the changed file list but `vendor/modules.txt` is not, flag that `go mod vendor` may need to be re-run.
     - Flag any import of a package that does not resolve to a module declared in `go.mod`.
+- **CEL Validation Rule Safety** *(Severity: CRITICAL)*:
+    - For every `+kubebuilder:validation:XValidation` rule in changed files, verify that **all accesses to optional fields are guarded by `has()`** in the short-circuit chain. An optional field is one with `omitempty` in its JSON tag or a pointer type.
+    - In Kubernetes CEL, accessing an absent optional field is a **runtime error**, not `false`. The `has()` function is an access precondition, not just a boolean predicate.
+    - Mentally evaluate each CEL rule with every optional field **absent**. If any evaluation path reaches `self.X` without a preceding `has(self.X)` in the same short-circuit chain → **CRITICAL FAIL**.
+    - Common anti-pattern: applying De Morgan's law (`!(A && B)` → `!A || !B`) collapses a `has()` guard and its field access into one term, dropping the guard. Example:
+      - Before (correct): `!(has(self.spec) && has(self.spec.field) && self.spec.field)`
+      - After (broken): `!has(self.spec) || !self.spec.field` — crashes when `spec` exists but `field` is absent.
+      - Fix: `!has(self.spec) || !has(self.spec.field) || !self.spec.field`
+- **Required Field Propagation** *(Severity: CRITICAL)*:
+    - For every field annotated with `+kubebuilder:validation:Required` in changed files, walk up the parent chain. If any ancestor struct field has `omitempty` in its JSON tag, the CRD schema will not enforce the `Required` marker because the ancestor itself is optional — the API server accepts a CR that omits the ancestor entirely.
+    - Check: If a child field is `Required`, every ancestor struct field up to the root object MUST either (a) lack `omitempty` in its JSON tag, or (b) have its own `+kubebuilder:validation:Required` marker. Violation → **CRITICAL FAIL**.
+    - Common case: `Spec` field on the root CR struct has `json:"spec,omitempty"` — this makes the entire spec optional, bypassing all required markers within it.
 
 #### Module E: Context-Adaptive Review
 

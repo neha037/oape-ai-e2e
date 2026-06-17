@@ -39,7 +39,7 @@ type WorkflowParams struct {
 	JiraToken  string
 
 	// WorkflowMode controls PR splitting: "full" (3 PRs), "feature" (2 PRs),
-	// or "bugfix" (1 PR). Defaults to "full".
+	// "single" (1 PR, full pipeline), or "bugfix" (1 PR). Defaults to "full".
 	WorkflowMode string
 
 	// K8s-only fields (ignored by the local backend).

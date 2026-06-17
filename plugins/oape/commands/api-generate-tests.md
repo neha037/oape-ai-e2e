@@ -334,8 +334,11 @@ Next Steps:
    rules. Read the CRD OpenAPI schema to determine the exact error message format.
 5. **Minimal YAML**: In test `initial`/`expected`/`updated` blocks, include only the fields
    relevant to that specific test case. Don't include unrelated fields.
-6. **Surgical additions**: When adding tests to an existing suite file, preserve all existing
-   tests and only append new ones for newly added fields or types.
+6. **Surgical modifications**: When modifying an existing suite file:
+   a. **Additive changes** (new fields or types): Preserve all existing tests and append new ones.
+   b. **Semantic changes** (field became required, default removed, validation tightened): Update affected existing tests so their fixtures and expectations match the new API contract.
+   c. **Removed behavior** (field or type intentionally deleted): Remove tests that validate the deleted behavior.
+   d. **Unchanged behavior**: Never modify tests for fields or types that were not changed.
 
 ## Arguments
 

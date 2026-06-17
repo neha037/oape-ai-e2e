@@ -174,8 +174,8 @@ func (a *App) HandleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if req.WorkflowMode == "" {
 		req.WorkflowMode = "full"
 	}
-	if req.WorkflowMode != "full" && req.WorkflowMode != "feature" && req.WorkflowMode != "bugfix" {
-		writeError(w, http.StatusBadRequest, "workflow_mode must be one of: full, feature, bugfix")
+	if req.WorkflowMode != "full" && req.WorkflowMode != "feature" && req.WorkflowMode != "bugfix" && req.WorkflowMode != "single" {
+		writeError(w, http.StatusBadRequest, "workflow_mode must be one of: full, feature, bugfix, single")
 		return
 	}
 

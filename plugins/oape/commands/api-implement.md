@@ -935,6 +935,35 @@ func (r *<Resource>Reconciler) validateSpec(instance *<apigroupversion>.<Resourc
 }
 ```
 
+**Defense-in-depth validation for required fields:**
+
+Even though kubebuilder markers enforce required fields at the CRD level, add explicit
+empty-string checks in the controller as defense-in-depth. CRD validation can be bypassed
+by direct etcd writes or webhook failures, and fake test clients may mask missing validation
+by returning different errors than real API servers.
+
+For each `+kubebuilder:validation:Required` string field in the spec, add an early check:
+
+```go
+if instance.Spec.RequiredField == "" {
+    validationErr := fmt.Errorf("requiredField must not be empty")
+    logger.Error(validationErr, "empty required field")
+    // Terminal failure — do NOT return an error (that causes requeue)
+    return r.setValidationFailureStatus(ctx, logger, instance, "RequiredField", validationErr)
+}
+```
+
+**Transient vs terminal error handling:**
+
+- **Transient errors** (network timeouts, API server unavailable): return the error to trigger
+  requeue with backoff. These are expected to resolve on retry.
+- **Terminal validation failures** (resource not found, empty required field, invalid enum):
+  update CR status to `Failed` with `completed=true`, record a Warning event, and return
+  `reconcile.Result{}, nil` (no requeue). These will never resolve by retrying.
+
+Never use `return reconcile.Result{Requeue: true}, err` for terminal validation failures —
+this causes infinite requeue loops.
+
 **Generate dependent resource reconcilers (for EACH resource from EP):**
 
 ```go
@@ -1275,6 +1304,43 @@ func (c *<Resource>Controller) sync(ctx context.Context, syncCtx factory.SyncCon
 
 ---
 
+### Phase 8.5: Existing Test Compatibility Audit
+
+Before finalizing, audit existing tests to ensure they are compatible with the generated controller code and any API changes it depends on.
+
+#### Step 8.5.1: Find Existing Test Files
+
+Find all `*_test.go` files in the repository (excluding `vendor/` and `zz_generated*`).
+
+#### Step 8.5.2: Identify Tests Affected by API Changes
+
+Scan existing test files for references to API types and fields whose semantics changed. Look for:
+- Test fixtures (struct literals) that omit newly-required fields
+- Expected error messages that changed due to new validation
+- Assertions on old default values that no longer apply
+
+#### Step 8.5.3: Update Affected Tests
+
+For each affected test:
+1. Update struct literals to include newly required fields with valid test values
+2. Update expected error strings if validation messages changed
+3. Update expected conditions or status values if controller behavior changed
+4. Preserve the test's intent — do not delete tests unless the tested behavior was intentionally removed
+
+#### Step 8.5.4: Verify Tests Pass
+
+```bash
+go test ./...
+```
+
+If tests still fail after updates:
+1. Read the failure output
+2. Determine if the failure is in the test fixture or in the generated controller code
+3. Fix accordingly
+4. Re-run until all tests pass
+
+---
+
 ### Phase 9: Output Summary
 
 After generating all files, provide a comprehensive summary:
@@ -1352,7 +1418,7 @@ Next Steps:
   2. Run 'make generate' to update generated code
   3. Run 'make manifests' to update RBAC/CRD manifests
   4. Run 'make build' to verify compilation
-  5. Run 'make test' to run tests
+  5. Tests should already pass from Phase 8.5 — run 'go test ./...' to confirm
   6. Run 'make lint' to check for issues
 ```
 

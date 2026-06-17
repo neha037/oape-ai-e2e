@@ -99,6 +99,36 @@ def _branch_id(ep_url: str | None, jira_ticket: str | None) -> str:
     return jira_ticket.lower() if jira_ticket else "unknown"
 
 
+def _sync_base_step(base: str, step_num: int) -> str:
+    """Generate a step to sync the local base branch from upstream before branching."""
+    return f"""{step_num}. Sync base branch before branching:
+   - If an `upstream` remote exists (fork mode): `git fetch upstream && git checkout {base} && git merge upstream/{base}`
+   - Otherwise: `git fetch origin && git checkout {base} && git pull`"""
+
+
+def _test_verify_step(step_num: int) -> str:
+    """Generate the step that runs existing tests and fixes failures."""
+    return f"""{step_num}. Run `go test ./...` to verify all existing tests still pass.
+   - If any tests fail, analyze each failure:
+     - If the test assumes old behavior that was intentionally changed (e.g., a field became required, a default was removed), update the test fixtures and assertions to match the new API contract
+     - If the failure reveals a bug in the generated code, fix the generated code
+   - Re-run `go test ./...` until all tests pass
+   - Do NOT skip or delete existing tests unless the tested behavior was intentionally removed"""
+
+
+def _push_and_pr_step(base: str, step_num: int) -> str:
+    """Generate the fork-aware push and PR creation step."""
+    return f"""{step_num}. Push and create PR:
+   - Detect fork mode: run `git remote get-url upstream 2>/dev/null`
+   - Push: `git push origin <branch-name>`
+   - If an `upstream` remote exists (fork mode):
+     - `UPSTREAM_REPO=$(git remote get-url upstream | sed 's|https://github.com/||' | sed 's|\\.git$||')`
+     - `GH_USER=$(gh api user --jq '.login')`
+     - `gh pr create --repo "$UPSTREAM_REPO" --base {base} --head "$GH_USER:<branch-name>" --title "..." --body "..."`
+   - If no `upstream` remote (direct mode):
+     - `gh pr create --base {base} --title "..." --body "..."`"""
+
+
 def _commit_prefix(jira_ticket: str | None) -> str:
     if jira_ticket:
         return f"feat({jira_ticket})"
@@ -126,26 +156,30 @@ Branch: `feature/api-types-{bid}`
 3. Run `{api_generate_cmd}` to generate API type definitions
 4. Run `/oape:api-generate-tests <path-to-generated-types>` to generate integration tests
 5. Run `make generate && make manifests` to regenerate code
-6. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-7. Commit all changes with a descriptive message
-8. Push the branch and create a PR against `{base}`
+{_test_verify_step(6)}
+7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+8. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 9)}
 
 ### PR #2: Controller Implementation
 Branch: `feature/controller-impl-{bid}`
-1. Create and checkout a new branch from `{base}` (or from PR #1's branch if needed)
-2. Run `{api_implement_cmd}` to generate controller/reconciler code
-3. Run `make generate && make build` to verify the build
-4. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-5. Commit all changes with a descriptive message
-6. Push the branch and create a PR against `{base}`
+{_sync_base_step(base, 1)}
+2. Create and checkout a new branch from `{base}` (or from PR #1's branch if needed)
+3. Run `{api_implement_cmd}` to generate controller/reconciler code
+4. Run `make generate && make build` to verify the build
+{_test_verify_step(5)}
+6. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+7. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 8)}
 
 ### PR #3: E2E Tests
 Branch: `feature/e2e-tests-{bid}`
-1. Create and checkout a new branch from `{base}` (or from PR #2's branch if needed)
-2. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
-3. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-4. Commit all changes with a descriptive message
-5. Push the branch and create a PR against `{base}`"""
+{_sync_base_step(base, 1)}
+2. Create and checkout a new branch from `{base}` (or from PR #2's branch if needed)
+3. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
+4. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+5. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 6)}"""
 
 
 def _pr_sections_feature(
@@ -169,19 +203,22 @@ Branch: `feature/api-types-{bid}`
 3. Run `{api_generate_cmd}` to generate API type definitions
 4. Run `/oape:api-generate-tests <path-to-generated-types>` to generate integration tests
 5. Run `make generate && make manifests` to regenerate code
-6. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-7. Commit all changes with a descriptive message
-8. Push the branch and create a PR against `{base}`
+{_test_verify_step(6)}
+7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+8. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 9)}
 
 ### PR #2: Controller Implementation + E2E Tests
 Branch: `feature/impl-{bid}`
-1. Create and checkout a new branch from `{base}` (or from PR #1's branch if needed)
-2. Run `{api_implement_cmd}` to generate controller/reconciler code
-3. Run `make generate && make build` to verify the build
-4. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
-5. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-6. Commit all changes with a descriptive message
-7. Push the branch and create a PR against `{base}`"""
+{_sync_base_step(base, 1)}
+2. Create and checkout a new branch from `{base}` (or from PR #1's branch if needed)
+3. Run `{api_implement_cmd}` to generate controller/reconciler code
+4. Run `make generate && make build` to verify the build
+{_test_verify_step(5)}
+6. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
+7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+8. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 9)}"""
 
 
 def _pr_sections_bugfix(
@@ -205,10 +242,41 @@ Branch: `fix/{bid}`
 3. Analyze the issue and implement the fix directly (modify API types, controller logic, or other code as needed)
 4. If API types were modified, run `make generate && make manifests`
 5. Run `make build` to verify the build
-6. Run `/oape:e2e-generate {base}` to generate/update e2e test artifacts
-7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-8. Commit all changes with a descriptive message
-9. Push the branch and create a PR against `{base}`"""
+{_test_verify_step(6)}
+7. Run `/oape:e2e-generate {base}` to generate/update e2e test artifacts
+8. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+9. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 10)}"""
+
+
+def _pr_sections_single(
+    ep_url: str | None,
+    jira_ticket: str | None,
+    repo_info: dict,
+    api_generate_cmd: str,
+    api_implement_cmd: str,
+) -> str:
+    """Generate the 1-PR full-pipeline workflow section."""
+    bid = _branch_id(ep_url, jira_ticket)
+    ticket = _review_ticket(jira_ticket)
+    base = repo_info["base_branch"]
+
+    return f"""You will create ONE Pull Request containing the complete implementation:
+
+### PR #1: API Types + Controller + E2E Tests
+Branch: `feature/{bid}`
+1. Run `/oape:init {repo_info['url']} {base}` to clone the repository and checkout the base branch
+2. Create and checkout a new branch from `{base}`
+3. Run `{api_generate_cmd}` to generate API type definitions
+4. Run `/oape:api-generate-tests <path-to-generated-types>` to generate integration tests
+5. Run `make generate && make manifests` to regenerate code
+6. Run `{api_implement_cmd}` to generate controller/reconciler code
+7. Run `make generate && make build` to verify the build
+{_test_verify_step(8)}
+9. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
+10. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+11. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 12)}"""
 
 
 def _pr_sections(
@@ -224,6 +292,8 @@ def _pr_sections(
         return _pr_sections_bugfix(ep_url, jira_ticket, repo_info, api_generate_cmd, api_implement_cmd)
     if workflow_mode == "feature":
         return _pr_sections_feature(ep_url, jira_ticket, repo_info, api_generate_cmd, api_implement_cmd)
+    if workflow_mode == "single":
+        return _pr_sections_single(ep_url, jira_ticket, repo_info, api_generate_cmd, api_implement_cmd)
     return _pr_sections_full(ep_url, jira_ticket, repo_info, api_generate_cmd, api_implement_cmd)
 
 
@@ -231,7 +301,7 @@ def _execution_instructions(workflow_mode: str, jira_ticket: str | None, has_pha
     """Shared execution instructions and autonomy block."""
     ticket = _review_ticket(jira_ticket)
 
-    mode_labels = {"full": "ALL THREE PRs", "feature": "BOTH PRs", "bugfix": "the PR"}
+    mode_labels = {"full": "ALL THREE PRs", "feature": "BOTH PRs", "bugfix": "the PR", "single": "the PR"}
     pr_label = mode_labels.get(workflow_mode, "ALL PRs")
 
     phase0_line = "1. Complete Phase 0 (analyze + design doc) first\n" if has_phase0 else ""
@@ -249,6 +319,13 @@ def _execution_instructions(workflow_mode: str, jira_ticket: str | None, has_pha
 4. For the review step, {review_note}
 5. When creating PRs, use `gh pr create` with descriptive titles and bodies
 6. Report the PR URL after each PR is created
+
+## Fork Workflow
+
+The `/oape:init` command automatically detects push access and sets up fork-based remotes when needed.
+- `origin` always points to the push target (your fork, or the upstream repo if you have write access)
+- If an `upstream` remote exists, you are in fork mode — use `gh pr create --repo <upstream-owner/repo>` to create cross-fork PRs
+- Always push with `git push origin <branch>` — this works in both direct and fork modes
 
 ## CRITICAL: Fully Autonomous Execution
 

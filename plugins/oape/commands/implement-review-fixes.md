@@ -129,7 +129,19 @@ go build ./...
 go vet ./...
 ```
 
-If compilation or vetting fails:
+```bash
+# Step 4.3: Run tests to verify fixes don't break existing behavior
+go test ./...
+```
+
+If any tests fail:
+1. Read the failure output to identify which fix introduced the test failure
+2. Determine if the fix changed behavior that existing tests depend on
+3. If the fix is correct and the test needs updating, update the test to match the new behavior
+4. If the fix introduced a regression, revert that fix and note it in the summary
+5. Re-run `go test ./...` to confirm
+
+If compilation, vetting, or tests fail:
 1. Read the error output to identify which fix introduced the failure
 2. Attempt to correct the failing fix
 3. Re-run `go build ./...` to confirm the correction
@@ -138,7 +150,7 @@ If compilation or vetting fails:
 **Build Consistency Check:**
 
 ```bash
-# Step 4.3: Check if any types.go files were modified
+# Step 4.4: Check if any types.go files were modified
 git diff --name-only
 ```
 
@@ -174,10 +186,10 @@ INFO Fixes:
 Verification:
   go build ./...  : PASS | FAIL
   go vet ./...    : PASS | FAIL
+  go test ./...   : PASS | FAIL
 
 Post-Fix Actions Required:
   - Run 'make generate && make manifests' (if types were modified)
-  - Run 'make test' to validate behavior
 ```
 
 ## Return Value

@@ -469,6 +469,55 @@ as the conventions define different rules for each.
 After generating, review every changed line against the conventions. If any violation has a
 convention-compliant alternative, apply it and note the deviation in the Phase 7 summary.
 
+#### CEL Validation Rules — `has()` Guard Requirement
+
+When writing `+kubebuilder:validation:XValidation` CEL rules, **every access to an optional
+(`omitempty`) field MUST be preceded by a `has()` guard** in the short-circuit evaluation chain.
+In Kubernetes CEL, accessing a field that is not present in the object is a **runtime error**,
+not `false`. The `has()` function is not a boolean predicate — it is an access precondition.
+
+**Correct** — guard before access:
+```go
+// +kubebuilder:validation:XValidation:rule="!has(self.gatherSpec) || !has(self.gatherSpec.audit) || !self.gatherSpec.audit || !has(self.imageStreamRef)",message="..."
+```
+
+**Wrong** — accessing optional field without guard:
+```go
+// +kubebuilder:validation:XValidation:rule="!has(self.gatherSpec) || !self.gatherSpec.audit || !has(self.imageStreamRef)",message="..."
+```
+
+The second form crashes with `no such key: audit` when `gatherSpec` exists but `audit` is omitted.
+
+Rules:
+1. For every field access `self.X` or `self.X.Y` in a CEL expression, check if `X` (or `Y`) has
+   `omitempty` in its JSON tag or is a pointer type. If so, add `has(self.X)` (or
+   `has(self.X.Y)`) **before** the access in the short-circuit chain.
+2. When refactoring CEL rules (e.g., applying De Morgan's law to convert `!(A && B)` to
+   `!A || !B`), **never collapse a `has()` guard and its corresponding field access into a single
+   term**. The guard and the access are semantically coupled — the guard enables the access.
+3. Verify the rule by mentally evaluating it with the optional field **absent** from the object.
+   If any code path reaches a field access without a preceding `has()` guard, the rule is broken.
+
+#### Required Field Propagation — Parent JSON Tag Consistency
+
+When marking a field as `+kubebuilder:validation:Required`, verify that **every ancestor struct
+field up to the root CR type does NOT have `omitempty` in its JSON tag**. If an ancestor is
+optional (`omitempty`), the API server accepts CRs that omit the ancestor entirely, silently
+bypassing all `Required` markers on descendant fields.
+
+Common fix: if `Spec` has `json:"spec,omitempty"`, remove `omitempty` and add
+`+kubebuilder:validation:Required`:
+```go
+// Before (broken — spec is optional, child Required markers are bypassed):
+Spec   MySpec   `json:"spec,omitempty"`
+
+// After (correct — spec is required at the CRD schema level):
+// +kubebuilder:validation:Required
+Spec   MySpec   `json:"spec"`
+```
+
+Do NOT change the `Status` field — `json:"status,omitempty"` is correct for status subresources.
+
 ### Phase 6: Add FeatureGate Registration (if applicable)
 
 If the repository contains a `features.go` file (found in Phase 3), read it to learn the existing

@@ -91,6 +91,7 @@
       <select id="workflow_mode" name="workflow_mode">
         <option value="full">Full Feature (3 PRs: API Types + Controller + E2E)</option>
         <option value="feature">Feature (2 PRs: API Types + Controller/E2E)</option>
+        <option value="single">Single PR (1 PR: API Types + Controller + E2E)</option>
         <option value="bugfix">Bug Fix (1 PR: Fix + E2E)</option>
       </select>
       <div class="field-hint">Controls how the work is split across pull requests</div>
@@ -157,6 +158,9 @@ const overviewByMode = {
   feature: [
     '<strong>PR #1:</strong> API Types + Integration Tests',
     '<strong>PR #2:</strong> Controller Implementation + E2E Tests'
+  ],
+  single: [
+    '<strong>PR #1:</strong> API Types + Controller + E2E Tests (all in one PR)'
   ],
   bugfix: [
     '<strong>PR #1:</strong> Bug Fix + E2E Tests (all in one PR)'

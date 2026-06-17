@@ -54,9 +54,21 @@ if ! command -v git &> /dev/null; then
   MISSING_TOOLS="$MISSING_TOOLS git"
 fi
 
+# Check gh (GitHub CLI)
+if ! command -v gh &> /dev/null; then
+  MISSING_TOOLS="$MISSING_TOOLS gh"
+fi
+
 if [ -n "$MISSING_TOOLS" ]; then
   echo "PRECHECK FAILED: Missing required tools:$MISSING_TOOLS"
   echo "Please install the missing tools and try again."
+  exit 1
+fi
+
+# Verify GitHub CLI is authenticated
+if ! gh auth status &> /dev/null 2>&1; then
+  echo "PRECHECK FAILED: GitHub CLI is not authenticated."
+  echo "Run 'gh auth login' to authenticate."
   exit 1
 fi
 
@@ -98,9 +110,11 @@ if [ -d "$CLONE_DIR" ]; then
     # Normalize URLs for comparison (strip trailing slashes and .git suffix)
     NORM_EXISTING=$(echo "$EXISTING_REMOTE" | sed 's/\.git$//' | sed 's:/$::')
     NORM_CLONE=$(echo "$CLONE_URL" | sed 's/\.git$//' | sed 's:/$::')
+    # Also check the upstream remote (set when fork mode was previously configured)
+    NORM_UPSTREAM=$(git -C "$CLONE_DIR" remote get-url upstream 2>/dev/null | sed 's/\.git$//' | sed 's:/$::' || true)
 
-    if [ "$NORM_EXISTING" = "$NORM_CLONE" ]; then
-      echo "Existing directory is already a clone of the same repository."
+    if [ "$NORM_EXISTING" = "$NORM_CLONE" ] || [ "$NORM_UPSTREAM" = "$NORM_CLONE" ]; then
+      echo "Existing directory is already a clone of the expected repository."
       echo "Using existing directory as-is."
     else
       echo "FAILED: Directory '$CLONE_DIR' exists but points to a different remote."
@@ -132,6 +146,119 @@ else
 
   echo "Clone complete."
 fi
+```
+
+---
+
+### Phase 2.5: Fork Setup (Push Access Detection and Remote Configuration)
+
+Detect whether the authenticated user has push access to the repository. If not, create or find a fork and configure remotes so that `origin` points to the fork (push target) and `upstream` points to the org repo.
+
+```bash
+cd "$CLONE_DIR" || { echo "FAILED: Cannot change to directory $CLONE_DIR"; exit 1; }
+
+# Extract owner/repo from the clone URL
+OWNER_REPO=$(echo "$CLONE_URL" | sed 's|https://github.com/||' | sed 's|\.git$||' | sed 's|/$||')
+
+# Check if fork remotes are already configured
+EXISTING_UPSTREAM=$(git remote get-url upstream 2>/dev/null || true)
+NORM_EXISTING_UPSTREAM=$(echo "$EXISTING_UPSTREAM" | sed 's/\.git$//' | sed 's:/$::')
+NORM_CLONE_URL=$(echo "$CLONE_URL" | sed 's/\.git$//' | sed 's:/$::')
+
+if [ "$NORM_EXISTING_UPSTREAM" = "$NORM_CLONE_URL" ]; then
+  echo "Fork remotes already configured (upstream → $EXISTING_UPSTREAM)."
+  echo "FORK_MODE=fork"
+  FORK_MODE="fork"
+else
+  # Check push access
+  PERMISSION=$(gh repo view "$OWNER_REPO" --json viewerPermission --jq '.viewerPermission' 2>/dev/null || echo "NONE")
+
+  if [ "$PERMISSION" = "WRITE" ] || [ "$PERMISSION" = "MAINTAIN" ] || [ "$PERMISSION" = "ADMIN" ]; then
+    echo "Direct push access confirmed (permission=$PERMISSION)."
+    echo "FORK_MODE=direct"
+    FORK_MODE="direct"
+  else
+    echo "No push access to $OWNER_REPO (permission=$PERMISSION). Setting up fork-based workflow."
+
+    GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+    if [ -z "$GH_USER" ]; then
+      echo "FAILED: Could not determine GitHub username."
+      echo "Ensure GitHub CLI is authenticated: gh auth login"
+      exit 1
+    fi
+
+    # GitHub App bot tokens cannot fork repos — fall back to direct push
+    if [[ "$GH_USER" == *"[bot]"* ]]; then
+      echo "WARNING: Running as GitHub App bot ($GH_USER). Fork workflow is not available."
+      echo "The bot must have write access to $OWNER_REPO for push to succeed."
+      echo "FORK_MODE=direct"
+      FORK_MODE="direct"
+    fi
+
+    REPO_NAME=$(basename "$OWNER_REPO")
+
+    if [ "$FORK_MODE" != "direct" ]; then
+      # Check if a fork already exists
+      FORK_PARENT=$(gh repo view "$GH_USER/$REPO_NAME" --json parent --jq '.parent.nameWithOwner' 2>/dev/null || echo "")
+
+      if [ "$FORK_PARENT" = "$OWNER_REPO" ]; then
+        echo "Fork already exists at $GH_USER/$REPO_NAME."
+      else
+        echo "Creating fork of $OWNER_REPO..."
+        gh repo fork "$OWNER_REPO" --clone=false
+
+        # Wait for GitHub to provision the fork (up to 30 seconds)
+        for i in $(seq 1 6); do
+          FORK_CHECK=$(gh repo view "$GH_USER/$REPO_NAME" --json parent --jq '.parent.nameWithOwner' 2>/dev/null || echo "")
+          if [ "$FORK_CHECK" = "$OWNER_REPO" ]; then
+            echo "Fork created successfully."
+            break
+          fi
+          echo "Waiting for fork to be provisioned..."
+          sleep 5
+        done
+
+        FORK_VERIFY=$(gh repo view "$GH_USER/$REPO_NAME" --json parent --jq '.parent.nameWithOwner' 2>/dev/null || echo "")
+        if [ "$FORK_VERIFY" != "$OWNER_REPO" ]; then
+          echo "FAILED: Fork was not provisioned within 30 seconds."
+          echo "Try again or create the fork manually: gh repo fork $OWNER_REPO --clone=false"
+          exit 1
+        fi
+      fi
+
+      FORK_URL="https://github.com/$GH_USER/$REPO_NAME.git"
+
+      # Configure remotes: origin → fork, upstream → org repo
+      # Handle partial state from a previous failed run
+      CURRENT_ORIGIN=$(git remote get-url origin 2>/dev/null || true)
+      CURRENT_UPSTREAM=$(git remote get-url upstream 2>/dev/null || true)
+      NORM_CURRENT_ORIGIN=$(echo "$CURRENT_ORIGIN" | sed 's/\.git$//' | sed 's:/$::')
+      NORM_FORK=$(echo "$FORK_URL" | sed 's/\.git$//' | sed 's:/$::')
+
+      if [ "$NORM_CURRENT_ORIGIN" = "$NORM_FORK" ]; then
+        echo "origin already points to fork."
+      else
+        if [ -n "$CURRENT_UPSTREAM" ]; then
+          echo "upstream remote already exists (from a previous run). Removing stale origin."
+          git remote remove origin
+        else
+          git remote rename origin upstream
+        fi
+        git remote add origin "$FORK_URL"
+      fi
+
+      git fetch origin
+
+      echo "Remotes configured:"
+      echo "  origin   → $FORK_URL (your fork — push target)"
+      echo "  upstream → $CLONE_URL (org repo — PR target)"
+      echo "FORK_MODE=fork"
+      FORK_MODE="fork"
+    fi
+  fi
+fi
+
+cd ..
 ```
 
 ---
@@ -183,6 +310,9 @@ Base Branch: <base-branch>
 Local Path:  <absolute-path-to-cloned-dir>
 Go Module:   <module-name>
 Framework:   <controller-runtime | library-go | unknown>
+Fork Mode:   <direct | fork>
+Origin:      <origin-remote-url>
+Upstream:    <upstream-remote-url, if fork mode>
 ```
 
 ---
@@ -220,4 +350,5 @@ When failing, provide a clear error message explaining:
 ## Prerequisites
 
 - **git** -- Git installed
+- **gh** (GitHub CLI) -- installed and authenticated (`gh auth login`)
 - Access to the target Git repository
