@@ -88,6 +88,9 @@ func (r *Reconciler) reconcile(ctx context.Context, obj *v1.Resource) {
         panic(err)                // Don't panic!
     }
 }
+
+// BAD: Ignoring errors in test setup (applies to ALL code, including tests)
+_ = configv1.Install(scheme)     // Check with t.Fatalf instead
 ```
 
 ### 4. Error Messages

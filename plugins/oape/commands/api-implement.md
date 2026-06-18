@@ -935,6 +935,38 @@ func (r *<Resource>Reconciler) validateSpec(instance *<apigroupversion>.<Resourc
 }
 ```
 
+#### Logging Hygiene — No Customer-Identifying Data in Logs
+
+Operator logs are collected in must-gather bundles, forwarded to log aggregation systems, and
+attached to support cases. **Never log values that identify a specific cluster or customer.**
+
+**Forbidden in log parameters:**
+- Cluster IDs or any suffix/hash derived from them
+- Case IDs, case management credentials, or secret names containing customer data
+- SFTP usernames, upload paths containing case IDs
+- Directory names, file paths, or URLs that embed any of the above
+- Any field from a Secret's `.data` or `.stringData`
+
+**Allowed in log parameters:**
+- Boolean flags (`"hasClusterID", true`)
+- Counts and sizes (`"podCount", 3`)
+- Resource kinds and API versions (`"gvk", gvk.String()`)
+- Namespace and resource names (these are operator-controlled, not customer-identifying)
+- Durations and timestamps (`"elapsed", duration`)
+- Error messages (but scrub embedded secret values if present)
+
+**Example — correct:**
+```go
+log.V(1).Info("Generated must-gather directory name", "hasClusterID", clusterIDSuffix != "")
+```
+
+**Example — wrong (leaks cluster ID suffix in directory name):**
+```go
+log.V(1).Info("Generated must-gather directory name", "directoryName", dirName, "hasClusterID", clusterIDSuffix != "")
+```
+
+When in doubt, log a boolean or count describing the data rather than the data itself.
+
 **Defense-in-depth validation for required fields:**
 
 Even though kubebuilder markers enforce required fields at the CRD level, add explicit
@@ -1339,6 +1371,21 @@ If tests still fail after updates:
 3. Fix accordingly
 4. Re-run until all tests pass
 
+### Phase 8.6: Lint Verification
+
+Run the project's linter to catch issues that `go vet` and `go test` miss (unchecked error returns, ineffectual assignments, security patterns):
+
+```bash
+make lint 2>&1 || echo "LINT_SKIPPED: no lint target available"
+```
+
+If `make lint` reports issues:
+1. Read the linter output and fix each finding
+2. Re-run `make lint` to confirm
+3. If a finding cannot be fixed after one retry, note it and continue
+
+If the repo has no `make lint` target, skip this step.
+
 ---
 
 ### Phase 9: Output Summary
@@ -1419,7 +1466,7 @@ Next Steps:
   3. Run 'make manifests' to update RBAC/CRD manifests
   4. Run 'make build' to verify compilation
   5. Tests should already pass from Phase 8.5 — run 'go test ./...' to confirm
-  6. Run 'make lint' to check for issues
+  6. Lint should already pass from Phase 8.6 — run 'make lint' to confirm
 ```
 
 ---

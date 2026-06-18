@@ -54,6 +54,16 @@
   .or-divider { text-align: center; font-size: .85rem; color: #999; margin: 8px 0;
                 font-weight: 600; text-transform: uppercase; }
   .optional-tag { font-weight: 400; color: #999; font-size: .8rem; }
+  #progressContainer { margin-top: 16px; display: none; }
+  .progress-header { display: flex; justify-content: space-between; align-items: center;
+                     margin-bottom: 6px; font-size: .85rem; }
+  .progress-stage { font-weight: 600; color: #333; }
+  .progress-meta { color: #888; font-size: .8rem; }
+  .progress-bar-bg { height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; background: #4a90d9; border-radius: 4px;
+                       transition: width 0.5s ease; width: 0%; }
+  .progress-detail { display: flex; justify-content: space-between; margin-top: 6px;
+                     font-size: .8rem; color: #888; }
 </style>
 </head>
 <body>
@@ -128,6 +138,19 @@
   </form>
 
   <div id="status"></div>
+  <div id="progressContainer">
+    <div class="progress-header">
+      <span class="progress-stage" id="progressStage"></span>
+      <span class="progress-meta" id="progressStep"></span>
+    </div>
+    <div class="progress-bar-bg">
+      <div class="progress-bar-fill" id="progressBar"></div>
+    </div>
+    <div class="progress-detail">
+      <span id="progressLabel"></span>
+      <span id="progressTime"></span>
+    </div>
+  </div>
   <div id="resultSuccess" class="result-success"></div>
   <div id="resultFailed" class="result-failed"></div>
   <pre id="logOutput"></pre>
@@ -146,6 +169,77 @@ const jiraTokenInput = document.getElementById('jira_token');
 const jiraTokenGroup = document.getElementById('jiraTokenGroup');
 const modeSelect  = document.getElementById('workflow_mode');
 const stepsEl     = document.getElementById('workflowSteps');
+const progressContainer = document.getElementById('progressContainer');
+const progressStage = document.getElementById('progressStage');
+const progressStep  = document.getElementById('progressStep');
+const progressBar   = document.getElementById('progressBar');
+const progressLabel = document.getElementById('progressLabel');
+const progressTime  = document.getElementById('progressTime');
+
+let workflowStartTime = null;
+
+function updateProgress(data) {
+  progressContainer.style.display = 'block';
+  const pct = calcProgressPercent(data);
+  progressBar.style.width = pct + '%';
+  progressStage.textContent = data.totalPrs > 1
+    ? 'PR ' + data.pr + ' of ' + data.totalPrs
+    : 'PR 1';
+  progressStep.textContent = 'Step ' + data.step + ' of ' + data.totalSteps;
+  progressLabel.textContent = data.label;
+  if (workflowStartTime && pct >= 10) {
+    const elapsed = (Date.now() - workflowStartTime) / 1000;
+    const estTotal = elapsed / (pct / 100);
+    const remaining = Math.max(0, estTotal - elapsed);
+    progressTime.textContent = remaining < 60
+      ? '< 1 min remaining'
+      : '~' + Math.ceil(remaining / 60) + ' min remaining';
+  } else {
+    progressTime.textContent = '';
+  }
+}
+
+function calcProgressPercent(data) {
+  const stepsPerPr = {'full': [9,8,6], 'feature': [9,8], 'single': [11], 'bugfix': [9]};
+  const mode = modeSelect.value || 'full';
+  const steps = stepsPerPr[mode] || stepsPerPr.full;
+  const totalAllSteps = steps.reduce((a, b) => a + b, 0);
+  let completed = 0;
+  for (let i = 0; i < data.pr - 1; i++) completed += (steps[i] || 0);
+  completed += data.step;
+  return Math.min(100, Math.round((completed / totalAllSteps) * 100));
+}
+
+function updateProgressFromLog(line) {
+  if (!progressContainer.style.display || progressContainer.style.display === 'none') return;
+  const patterns = [
+    [/\/oape:init/, 'Initializing repository'],
+    [/\/oape:api-generate-tests/, 'Generating integration tests'],
+    [/\/oape:api-generate/, 'Generating API types'],
+    [/\/oape:api-implement/, 'Generating controller code'],
+    [/\/oape:e2e-generate/, 'Generating E2E tests'],
+    [/\/oape:review/, 'Running review'],
+    [/make generate/, 'Running code generation'],
+    [/make build/, 'Building'],
+    [/go test/, 'Running tests'],
+  ];
+  for (const [re, label] of patterns) {
+    if (re.test(line)) {
+      progressLabel.textContent = label;
+      return;
+    }
+  }
+}
+
+function resetProgress() {
+  progressContainer.style.display = 'none';
+  progressBar.style.width = '0%';
+  progressStage.textContent = '';
+  progressStep.textContent = '';
+  progressLabel.textContent = '';
+  progressTime.textContent = '';
+  workflowStartTime = null;
+}
 
 const repoMeta = {};
 
@@ -241,6 +335,8 @@ form.addEventListener('submit', async (e) => {
   logEl.textContent = '';
   successEl.style.display = 'none';
   failedEl.style.display = 'none';
+  resetProgress();
+  workflowStartTime = Date.now();
   statusEl.innerHTML = '<span class="spinner"></span> Submitting workflow job\u2026';
 
   try {
@@ -280,6 +376,14 @@ function streamJob(jobId) {
     logEl.textContent += e.data + '\n';
     logEl.scrollTop = logEl.scrollHeight;
 
+    if (e.data.startsWith('PROGRESS:')) {
+      try {
+        const pdata = JSON.parse(e.data.substring(9));
+        updateProgress(pdata);
+      } catch (_) {}
+      return;
+    }
+
     if (e.data.startsWith('PR_CREATED:')) {
       prLinks.push(e.data.replace('PR_CREATED:', '').trim());
     }
@@ -291,14 +395,25 @@ function streamJob(jobId) {
       failMsg = e.data.replace('WORKFLOW_FAILED:', '').trim();
     }
 
-    const line = e.data.length > 120 ? e.data.substring(0, 120) + '\u2026' : e.data;
-    statusEl.innerHTML = '<span class="spinner"></span> ' + escapeHtml(line);
+    updateProgressFromLog(e.data);
+
+    const trimmed = e.data.trim();
+    if (trimmed && trimmed !== '{' && trimmed !== '}' && !trimmed.startsWith('{')) {
+      const line = e.data.length > 120 ? e.data.substring(0, 120) + '\u2026' : e.data;
+      statusEl.innerHTML = '<span class="spinner"></span> ' + escapeHtml(line);
+    }
   });
 
   es.addEventListener('complete', (e) => {
     const result = JSON.parse(e.data);
     es.close();
     btn.disabled = false;
+    if (result.status === 'succeeded') {
+      progressBar.style.width = '100%';
+      progressLabel.textContent = 'Complete';
+      progressTime.textContent = '';
+    }
+    setTimeout(resetProgress, 3000);
 
     if (result.status === 'succeeded') {
       statusEl.innerHTML = 'Workflow completed successfully.';

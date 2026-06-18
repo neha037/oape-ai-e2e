@@ -81,7 +81,7 @@ Apply **all** of the following review criteria. Modules A–D are **mandatory** 
 **Safety & Patterns**:
 - **Context:** REJECT `context.TODO()` in production paths. Must use `context.WithTimeout`.
 - **Concurrency:** `go func` must be tracked (WaitGroup/ErrGroup). No race conditions.
-- **Errors:** Must use `fmt.Errorf("... %w", err)`. No capitalized error strings.
+- **Errors:** Must use `fmt.Errorf("... %w", err)`. No capitalized error strings. Flag `_ =` assignments that discard error returns — in production code return the error, in test code use `t.Fatalf`.
 - **Complexity:** Flag functions > 50 lines or > 3 nesting levels.
 
 **Idiomatic Clean Code (via Golang-Skills):**
@@ -95,6 +95,13 @@ Apply **all** of the following review criteria. Modules A–D are **mandatory** 
 - Read `main.go` or any file matching `*scheme*.go`. Look for `AddToScheme` or `SchemeBuilder.Register` calls.
 - Every external type (not in the operator's own API group — e.g., `corev1`, `routev1`, `configv1`) used as a client call target **must** have a corresponding `AddToScheme` in scheme setup.
 - Flag any external type used in client calls but missing from scheme registration.
+
+**Sensitive Data in Logs** *(Severity: CRITICAL)*:
+- For every `log.Info`, `log.V().Info`, `logger.Info`, `logger.Error`, `log.Error`, `klog.Infof`, `klog.V().Infof` call in changed Go files, examine each key-value parameter.
+- Flag any parameter whose value contains or is derived from: cluster IDs (or suffixes/hashes of them), case IDs, secret data (`.data`, `.stringData` fields), SFTP credentials, upload paths containing case IDs, or directory names/file paths that embed cluster-identifying data.
+- Operator logs are collected in must-gather bundles, forwarded to aggregation systems, and attached to support cases — any customer-identifying data in logs is a data leak.
+- Safe alternatives: log boolean flags (`"hasClusterID", true`), counts (`"podCount", n`), resource kinds, durations, or error messages (with secrets scrubbed).
+- Ignore test files (`*_test.go`).
 
 **Namespace Hardcoding** *(Severity: WARNING)*:
 - In changed Go files under `controllers/`, `pkg/controller/`, or any reconciler file, scan for string literals matching `"openshift-*"`, `"kube-*"`, or `"default"` used as namespace values.
@@ -134,14 +141,31 @@ Apply **all** of the following review criteria. Modules A–D are **mandatory** 
     - If changed Go files introduce new import paths, verify they exist in `go.mod` (direct or indirect).
     - If a `vendor/` directory exists and `go.mod` is in the changed file list but `vendor/modules.txt` is not, flag that `go mod vendor` may need to be re-run.
     - Flag any import of a package that does not resolve to a module declared in `go.mod`.
+- **Dead Test File Detection** *(Severity: WARNING)*:
+    - For every new file in the diff (`git diff ${BASE_REF}...HEAD --name-only --diff-filter=A`), check if it is a test file (`.testsuite.yaml`, `_test.go`, or files under a `tests/` directory).
+    - For `.testsuite.yaml` files: search the repo (excluding `vendor/`) for Go code that discovers and runs YAML test suites: `grep -rl "testsuite\.yaml\|TestSuite\|crdvalidationtest" --include="*.go"`. If no runner exists, flag: "Generated test file `<path>` is not connected to any test runner and will never be executed. Delete it or wire up a YAML test runner."
+    - For `_test.go` files in non-standard directories (e.g., `output/`): verify the package is reachable by `go test ./...` — check that the directory is under a module path and not excluded by build tags or `.gitignore`. If unreachable, flag: "Test file `<path>` is in a directory not discovered by `go test ./...`."
+    - Dead test files create a false sense of test coverage — they must be removed or connected to a runner.
+- **CRD Manifest Consistency** *(Severity: CRITICAL)*:
+    - Find all CRD YAML files across the repo: `grep -rl "kind: CustomResourceDefinition" --include="*.yaml" --include="*.yml"` (excluding `vendor/`, `testdata/`, `.git/`).
+    - Group files by CRD name (`metadata.name` field in each file).
+    - For each CRD name that appears in 2+ files, compare the `spec.versions[*].schema.openAPIV3Schema` and `spec.versions[*].additionalPrinterColumns` sections across all copies.
+    - Any schema divergence → **CRITICAL**: "CRD manifest drift detected: `<file-a>` and `<file-b>` have different schemas for CRD `<crd-name>`. Run `make manifests` and sync all copies from the canonical source."
+    - Common locations to check: `config/crd/bases/`, `deploy/crds/`, `bundle/manifests/`.
 - **CEL Validation Rule Safety** *(Severity: CRITICAL)*:
     - For every `+kubebuilder:validation:XValidation` rule in changed files, verify that **all accesses to optional fields are guarded by `has()`** in the short-circuit chain. An optional field is one with `omitempty` in its JSON tag or a pointer type.
     - In Kubernetes CEL, accessing an absent optional field is a **runtime error**, not `false`. The `has()` function is an access precondition, not just a boolean predicate.
-    - Mentally evaluate each CEL rule with every optional field **absent**. If any evaluation path reaches `self.X` without a preceding `has(self.X)` in the same short-circuit chain → **CRITICAL FAIL**.
-    - Common anti-pattern: applying De Morgan's law (`!(A && B)` → `!A || !B`) collapses a `has()` guard and its field access into one term, dropping the guard. Example:
-      - Before (correct): `!(has(self.spec) && has(self.spec.field) && self.spec.field)`
-      - After (broken): `!has(self.spec) || !self.spec.field` — crashes when `spec` exists but `field` is absent.
-      - Fix: `!has(self.spec) || !has(self.spec.field) || !self.spec.field`
+    - **CEL rules MUST use the conjunction (`&&`) form inside a negation, never the disjunction (`||`) form.** The `&&` operator reliably short-circuits in all Kubernetes CEL versions; the `||` form does not — certain K8s/OpenShift CEL engine versions evaluate all `||` terms eagerly, causing field accesses to run even when a preceding `has()` guard should have prevented it.
+    - Mentally evaluate each CEL rule with every optional field **absent**. If any evaluation path reaches `self.X` without a preceding `has(self.X)` in the same `&&` chain → **CRITICAL FAIL**.
+    - Common anti-pattern: applying De Morgan's law to convert `!(A && B)` into `!A || !B`. Even with `has()` guards present, the `||` form breaks in practice. Example:
+      - Correct (`&&` form): `!(has(self.spec) && has(self.spec.field) && self.spec.field)`
+      - Broken (`||` form, even with guards): `!has(self.spec) || !has(self.spec.field) || !self.spec.field` — crashes with `no such key` on certain K8s versions when `spec` exists but `field` is absent.
+      - Fix: keep or rewrite to the `&&` form: `!(has(self.spec) && has(self.spec.field) && self.spec.field)`
+- **Linter Compliance** *(Severity: WARNING)*:
+    - Check if the repo has a `make lint` target: `make -n lint 2>/dev/null`.
+    - If available, run `make lint` and report any findings as WARNING issues with the file, line, description, and a `fix_prompt` that describes how to resolve the linter error.
+    - If `make lint` is not available, skip this check silently.
+    - This catches issues that `go vet` misses: unchecked error returns, ineffectual assignments, security patterns, and other static analysis findings configured in the project's linter.
 - **Required Field Propagation** *(Severity: CRITICAL)*:
     - For every field annotated with `+kubebuilder:validation:Required` in changed files, walk up the parent chain. If any ancestor struct field has `omitempty` in its JSON tag, the CRD schema will not enforce the `Required` marker because the ancestor itself is optional — the API server accepts a CR that omits the ancestor entirely.
     - Check: If a child field is `Required`, every ancestor struct field up to the root object MUST either (a) lack `omitempty` in its JSON tag, or (b) have its own `+kubebuilder:validation:Required` marker. Violation → **CRITICAL FAIL**.

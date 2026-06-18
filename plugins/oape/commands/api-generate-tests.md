@@ -12,13 +12,16 @@ oape:api-generate-tests
 ```
 
 ## Description
-The `oape:api-generate-tests` command generates `.testsuite.yaml` integration test files for
-OpenShift API type definitions. It reads the Go type definitions, CRD manifests, and validation
-markers to produce comprehensive test suites covering create, update, validation, and error
-scenarios.
+The `oape:api-generate-tests` command generates integration test files for OpenShift API type
+definitions. It reads the Go type definitions, CRD manifests, and validation markers to produce
+comprehensive test suites covering create, update, validation, and error scenarios.
 
-The generated tests use the YAML-based test suite format consumed by the envtest-based integration
-test runner (Ginkgo + controller-runtime envtest).
+The command **detects the repository's test infrastructure** before generating any files:
+- If the repo uses YAML-based test suites (`.testsuite.yaml` with an envtest runner), it generates
+  `.testsuite.yaml` files in the existing test directory structure.
+- If the repo does NOT have a YAML test runner, it does NOT generate `.testsuite.yaml` files.
+  Instead, it outputs a summary of recommended test cases for the user to add to their existing
+  Go test files.
 
 **This command should be run AFTER API types and CRD manifests have been generated.**
 
@@ -124,6 +127,61 @@ Also read the corresponding CRD manifest(s) to get:
 - The full CRD name (`<plural>.<group>`)
 - The OpenAPI v3 schema (for understanding the full validation tree)
 - Feature set annotations (Default, TechPreviewNoUpgrade, etc.)
+
+### Phase 1.5: Detect Test Infrastructure
+
+Before generating any test files, determine whether the repository supports YAML-based CRD
+validation test suites. This prevents generating dead test files that no runner will execute.
+
+```bash
+# Check 1: Search for existing .testsuite.yaml files
+EXISTING_SUITES=$(find "$REPO_ROOT" -name "*.testsuite.yaml" -not -path "*/vendor/*" 2>/dev/null)
+
+# Check 2: Search for Go code that discovers and runs YAML test suites
+YAML_TEST_RUNNER=$(grep -rl "testsuite\.yaml\|TestSuite\|crdvalidationtest\|CRDValidationTest" \
+  --include="*.go" "$REPO_ROOT" 2>/dev/null | grep -v vendor || true)
+```
+
+```thinking
+I must evaluate both checks:
+- If EXISTING_SUITES is non-empty: the repo already uses YAML test suites → proceed with generation
+- If YAML_TEST_RUNNER is non-empty: the repo has a Go test runner for YAML suites → proceed
+- If BOTH are empty: the repo does NOT use YAML-based CRD validation tests
+
+If the repo does not use YAML test suites, I MUST NOT generate .testsuite.yaml files. They would
+be dead files — never executed by any test runner, never caught by CI, creating a false sense of
+test coverage. Instead, I will output a structured summary of recommended test cases that the user
+can implement in their existing Go test files.
+```
+
+**If BOTH checks return empty (no YAML test infrastructure found):**
+
+STOP generating `.testsuite.yaml` files. Instead, output the following:
+
+```text
+=== Test Infrastructure Detection ===
+
+No YAML-based CRD validation test runner found in this repository.
+The repo uses Go-based tests exclusively.
+
+Skipping .testsuite.yaml generation to avoid creating dead test files.
+
+=== Recommended Test Cases ===
+
+Add the following test cases to your existing Go test files:
+
+onCreate:
+  - <list each test case with name, input, and expected result>
+
+onUpdate:
+  - <list each test case with name, initial state, updated state, and expected result>
+
+Target test file: <path to existing _test.go file for this API, or suggest one>
+```
+
+Then skip directly to Phase 5 (Output Summary) with a note that no files were generated.
+
+**If either check finds results: proceed to Phase 2.**
 
 ### Phase 2: Identify Test Directory and Existing Tests
 

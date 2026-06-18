@@ -476,27 +476,44 @@ When writing `+kubebuilder:validation:XValidation` CEL rules, **every access to 
 In Kubernetes CEL, accessing a field that is not present in the object is a **runtime error**,
 not `false`. The `has()` function is not a boolean predicate — it is an access precondition.
 
-**Correct** — guard before access:
+**Always use the conjunction (`&&`) form inside a negation.** The `&&` operator reliably
+short-circuits in all Kubernetes CEL versions, so the `has()` guard and its corresponding
+field access stay in the same evaluation chain. The disjunction (`||`) form is logically
+equivalent by De Morgan's law but **fails in practice** — certain Kubernetes/OpenShift CEL
+engine versions do not fully short-circuit `||`, causing the field access to be evaluated
+even when the `has()` guard should have prevented it.
+
+**Correct** — conjunction inside negation (`&&` form):
+```go
+// +kubebuilder:validation:XValidation:rule="!(has(self.imageStreamRef) && has(self.gatherSpec) && has(self.gatherSpec.audit) && self.gatherSpec.audit)",message="audit mode is only supported with the default must-gather image"
+```
+
+**Wrong** — disjunction form (`||`), crashes even with `has()` guards:
 ```go
 // +kubebuilder:validation:XValidation:rule="!has(self.gatherSpec) || !has(self.gatherSpec.audit) || !self.gatherSpec.audit || !has(self.imageStreamRef)",message="..."
 ```
 
-**Wrong** — accessing optional field without guard:
+The second form crashes with `no such key: audit` when `gatherSpec` exists but `audit` is
+omitted, because the CEL engine evaluates `!self.gatherSpec.audit` despite the preceding
+`!has(self.gatherSpec.audit)` guard.
+
+**Also wrong** — missing `has()` guard entirely:
 ```go
 // +kubebuilder:validation:XValidation:rule="!has(self.gatherSpec) || !self.gatherSpec.audit || !has(self.imageStreamRef)",message="..."
 ```
 
-The second form crashes with `no such key: audit` when `gatherSpec` exists but `audit` is omitted.
-
 Rules:
-1. For every field access `self.X` or `self.X.Y` in a CEL expression, check if `X` (or `Y`) has
+1. **Always write CEL validation rules in the `!(A && B && C)` form, never the `!A || !B || !C`
+   form.** The `&&` chain guarantees that each field access is only reached after its `has()`
+   guard returns `true`. Do not apply De Morgan's law to convert between forms — the `&&` form
+   is the only safe pattern.
+2. For every field access `self.X` or `self.X.Y` in a CEL expression, check if `X` (or `Y`) has
    `omitempty` in its JSON tag or is a pointer type. If so, add `has(self.X)` (or
-   `has(self.X.Y)`) **before** the access in the short-circuit chain.
-2. When refactoring CEL rules (e.g., applying De Morgan's law to convert `!(A && B)` to
-   `!A || !B`), **never collapse a `has()` guard and its corresponding field access into a single
-   term**. The guard and the access are semantically coupled — the guard enables the access.
+   `has(self.X.Y)`) **immediately before** the access in the same `&&` chain.
 3. Verify the rule by mentally evaluating it with the optional field **absent** from the object.
    If any code path reaches a field access without a preceding `has()` guard, the rule is broken.
+4. When combining multiple constraints, nest them: `!(conditionA) && !(conditionB)` at the
+   outer level, with each condition using `&&` internally for its own `has()` guards.
 
 #### Required Field Propagation — Parent JSON Tag Consistency
 
@@ -525,6 +542,21 @@ FeatureGate registration pattern, then add a new FeatureGate following that patt
 
 If no `features.go` exists and the enhancement requires a FeatureGate, note this in the summary
 and advise the user on where to register it.
+
+### Phase 6.5: Lint Verification
+
+Run the project's linter to catch issues in the generated API types:
+
+```bash
+make lint 2>&1 || echo "LINT_SKIPPED: no lint target available"
+```
+
+If `make lint` reports issues in the generated files:
+1. Read the linter output and fix each finding
+2. Re-run `make lint` to confirm
+3. If a finding cannot be fixed after one retry, note it and continue
+
+If the repo has no `make lint` target, skip this step.
 
 ### Phase 7: Output Summary
 
@@ -568,7 +600,7 @@ Next Steps:
   1. Review the generated code for correctness
   2. Run 'make update' to regenerate CRDs and deep copy functions
   3. Run 'make verify' to validate all generated code
-  4. Run 'make lint' to check for kube-api-linter issues
+  4. Lint should already pass from Phase 6.5 — run 'make lint' to confirm
   5. If FeatureGate was added, verify it appears in the feature gate list
 ```
 

@@ -66,6 +66,82 @@ class WorkflowResult:
         return self.error is None
 
 
+# ---------------------------------------------------------------------------
+# Progress tracking
+# ---------------------------------------------------------------------------
+
+STEPS_BY_MODE = {
+    "full": {1: 11, 2: 10, 3: 7},
+    "feature": {1: 11, 2: 11},
+    "single": {1: 14},
+    "bugfix": {1: 12},
+}
+
+TOOL_PATTERNS = [
+    ("git clone", "Cloning repository"),
+    ("oape:init", "Initializing repository"),
+    ("oape:api-generate-tests", "Generating integration tests"),
+    ("oape:api-generate", "Generating API types"),
+    ("oape:api-implement", "Generating controller code"),
+    ("oape:e2e-generate", "Generating E2E tests"),
+    ("oape:review", "Running review"),
+    ("make generate", "Running code generation"),
+    ("make manifests", "Running manifests generation"),
+    ("make build", "Building"),
+    ("go test", "Running tests"),
+    ("verify artifacts", "Verifying artifacts"),
+    ("git push", "Pushing branch"),
+    ("gh pr create", "Creating pull request"),
+]
+
+
+class ProgressTracker:
+    """Watches tool use blocks and emits PROGRESS: lines to stdout."""
+
+    def __init__(self, workflow_mode: str):
+        self.mode = workflow_mode
+        steps = STEPS_BY_MODE.get(workflow_mode, STEPS_BY_MODE["full"])
+        self.total_prs = len(steps)
+        self.steps_per_pr = steps
+        self.current_pr = 1
+        self.current_step = 0
+        self._last_label = ""
+
+    def on_tool_use(self, tool_name: str, tool_input: dict) -> None:
+        if tool_name != "Bash":
+            return
+        command = tool_input.get("command", "") if isinstance(tool_input, dict) else str(tool_input)
+        for pattern, label in TOOL_PATTERNS:
+            if pattern in command:
+                if label == self._last_label:
+                    return
+                self._last_label = label
+                self.current_step = min(self.current_step + 1, self._total_steps_current_pr())
+                if label == "Creating pull request" and self.current_pr < self.total_prs:
+                    self.current_step = self._total_steps_current_pr()
+                self._emit(label)
+                return
+
+    def on_pr_created(self) -> None:
+        if self.current_pr < self.total_prs:
+            self.current_pr += 1
+            self.current_step = 0
+            self._last_label = ""
+
+    def _total_steps_current_pr(self) -> int:
+        return self.steps_per_pr.get(self.current_pr, 8)
+
+    def _emit(self, label: str) -> None:
+        progress = {
+            "pr": self.current_pr,
+            "totalPrs": self.total_prs,
+            "step": self.current_step,
+            "totalSteps": self._total_steps_current_pr(),
+            "label": label,
+        }
+        print(f"PROGRESS:{json.dumps(progress)}", flush=True)
+
+
 def _build_workflow_prompt(
     ep_url: str | None,
     jira_ticket: str | None,
@@ -116,6 +192,17 @@ def _test_verify_step(step_num: int) -> str:
    - Do NOT skip or delete existing tests unless the tested behavior was intentionally removed"""
 
 
+def _verify_artifacts_step(base: str, step_num: int) -> str:
+    """Generate the step that verifies generated artifacts are functional."""
+    return f"""{step_num}. Verify generated artifacts before review:
+   - List new files: `git diff --name-only --diff-filter=A {base}...HEAD`
+   - For every new `.testsuite.yaml` file: search for a Go test runner that discovers YAML test suites (`grep -rl "testsuite.yaml\\|TestSuite\\|crdvalidationtest" --include="*.go" . | grep -v vendor`). If no runner exists, DELETE the `.testsuite.yaml` file — it would be dead code.
+   - For every new `_test.go` file: verify its package is under a path reachable by `go test ./...` (not in `output/` or other orphaned directories). If unreachable, move it to the correct test directory or delete it.
+   - If `types.go` or any API types file was modified: run `make manifests` and check `git diff --name-only` — if any CRD YAML files show uncommitted changes, the manifests are out of sync. Stage them.
+   - If CRD YAML files exist in multiple directories (e.g., `deploy/crds/`, `bundle/manifests/`, `config/crd/bases/`): diff the schemas across copies and ensure they are identical. If they diverge, sync from the canonical source (`config/crd/bases/` or wherever `make manifests` writes).
+   - Do NOT proceed to the review step until all verifications pass."""
+
+
 def _push_and_pr_step(base: str, step_num: int) -> str:
     """Generate the fork-aware push and PR creation step."""
     return f"""{step_num}. Push and create PR:
@@ -129,9 +216,17 @@ def _push_and_pr_step(base: str, step_num: int) -> str:
      - `gh pr create --base {base} --title "..." --body "..."`"""
 
 
+def _post_review_comment_step(step_num: int) -> str:
+    """Generate the step that posts the review report as a PR comment."""
+    return f"""{step_num}. Post the review report as a PR comment:
+   - Format the review JSON report from the earlier `/oape:review` step as a readable markdown comment
+   - Use `gh pr comment <PR-NUMBER> --body "<formatted-report>"` to post it
+   - The comment should include: verdict, rating, issues summary table (severity, file, description), and fix summary"""
+
+
 def _commit_prefix(jira_ticket: str | None) -> str:
     if jira_ticket:
-        return f"feat({jira_ticket})"
+        return jira_ticket
     return "feat"
 
 
@@ -157,9 +252,11 @@ Branch: `feature/api-types-{bid}`
 4. Run `/oape:api-generate-tests <path-to-generated-types>` to generate integration tests
 5. Run `make generate && make manifests` to regenerate code
 {_test_verify_step(6)}
-7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-8. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 9)}
+{_verify_artifacts_step(base, 7)}
+8. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+9. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 10)}
+{_post_review_comment_step(11)}
 
 ### PR #2: Controller Implementation
 Branch: `feature/controller-impl-{bid}`
@@ -168,9 +265,11 @@ Branch: `feature/controller-impl-{bid}`
 3. Run `{api_implement_cmd}` to generate controller/reconciler code
 4. Run `make generate && make build` to verify the build
 {_test_verify_step(5)}
-6. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-7. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 8)}
+{_verify_artifacts_step(base, 6)}
+7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+8. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 9)}
+{_post_review_comment_step(10)}
 
 ### PR #3: E2E Tests
 Branch: `feature/e2e-tests-{bid}`
@@ -179,7 +278,8 @@ Branch: `feature/e2e-tests-{bid}`
 3. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
 4. Run `/oape:review {ticket} {base}` to review and auto-fix issues
 5. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 6)}"""
+{_push_and_pr_step(base, 6)}
+{_post_review_comment_step(7)}"""
 
 
 def _pr_sections_feature(
@@ -204,9 +304,11 @@ Branch: `feature/api-types-{bid}`
 4. Run `/oape:api-generate-tests <path-to-generated-types>` to generate integration tests
 5. Run `make generate && make manifests` to regenerate code
 {_test_verify_step(6)}
-7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-8. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 9)}
+{_verify_artifacts_step(base, 7)}
+8. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+9. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 10)}
+{_post_review_comment_step(11)}
 
 ### PR #2: Controller Implementation + E2E Tests
 Branch: `feature/impl-{bid}`
@@ -215,10 +317,12 @@ Branch: `feature/impl-{bid}`
 3. Run `{api_implement_cmd}` to generate controller/reconciler code
 4. Run `make generate && make build` to verify the build
 {_test_verify_step(5)}
-6. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
-7. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-8. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 9)}"""
+{_verify_artifacts_step(base, 6)}
+7. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
+8. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+9. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 10)}
+{_post_review_comment_step(11)}"""
 
 
 def _pr_sections_bugfix(
@@ -243,10 +347,12 @@ Branch: `fix/{bid}`
 4. If API types were modified, run `make generate && make manifests`
 5. Run `make build` to verify the build
 {_test_verify_step(6)}
-7. Run `/oape:e2e-generate {base}` to generate/update e2e test artifacts
-8. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-9. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 10)}"""
+{_verify_artifacts_step(base, 7)}
+8. Run `/oape:e2e-generate {base}` to generate/update e2e test artifacts
+9. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+10. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 11)}
+{_post_review_comment_step(12)}"""
 
 
 def _pr_sections_single(
@@ -273,10 +379,12 @@ Branch: `feature/{bid}`
 6. Run `{api_implement_cmd}` to generate controller/reconciler code
 7. Run `make generate && make build` to verify the build
 {_test_verify_step(8)}
-9. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
-10. Run `/oape:review {ticket} {base}` to review and auto-fix issues
-11. Commit all changes with a descriptive message
-{_push_and_pr_step(base, 12)}"""
+{_verify_artifacts_step(base, 9)}
+10. Run `/oape:e2e-generate {base}` to generate e2e test artifacts
+11. Run `/oape:review {ticket} {base}` to review and auto-fix issues
+12. Commit all changes with a descriptive message
+{_push_and_pr_step(base, 13)}
+{_post_review_comment_step(14)}"""
 
 
 def _pr_sections(
@@ -451,7 +559,7 @@ After creating the design document gist:
 ## Important Notes
 
 - Use `{jira_ticket}` for branch naming (lowercased)
-- Use conventional commit messages referencing the Jira ticket (e.g., "{_commit_prefix(jira_ticket)}: add API types for <feature>")
+- Use commit messages prefixed with the Jira ticket (e.g., "{_commit_prefix(jira_ticket)}: add API types for <feature>")
 - The `/oape:review` command will validate code against the actual Jira ticket's acceptance criteria
 - If the repository is already cloned, the init command will use the existing directory
 - Ensure each PR references {jira_ticket} in its title and description
@@ -487,7 +595,7 @@ def _prompt_ep_plus_jira(ep_url: str, jira_ticket: str, repo_info: dict, workflo
 ## Important Notes
 
 - Extract the EP number from the URL (e.g., 1234 from .../pull/1234) for branch naming
-- Use conventional commit messages referencing the Jira ticket (e.g., "{_commit_prefix(jira_ticket)}: add API types for <feature>")
+- Use commit messages prefixed with the Jira ticket (e.g., "{_commit_prefix(jira_ticket)}: add API types for <feature>")
 - The `/oape:review` command validates code against the actual Jira ticket {jira_ticket}'s acceptance criteria
 - If the repository is already cloned, the init command will use the existing directory
 - Ensure each PR references {jira_ticket} in its title and description
@@ -546,6 +654,7 @@ async def run_workflow(
     output_parts: list[str] = []
     conversation: list[dict] = []
     cost_usd = 0.0
+    progress = ProgressTracker(workflow_mode)
 
     conv_logger.info(
         f"\n{'=' * 60}\n[workflow] ep_url={ep_url}  jira={jira_ticket}  "
@@ -567,6 +676,8 @@ async def run_workflow(
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         output_parts.append(block.text)
+                        if "PR_CREATED:" in block.text:
+                            progress.on_pr_created()
                         entry = {
                             "type": "assistant",
                             "block_type": "text",
@@ -583,6 +694,7 @@ async def run_workflow(
                         _emit(entry)
                         conv_logger.info("[assistant:ThinkingBlock] (thinking)")
                     elif isinstance(block, ToolUseBlock):
+                        progress.on_tool_use(block.name, block.input)
                         entry = {
                             "type": "assistant",
                             "block_type": "tool_use",

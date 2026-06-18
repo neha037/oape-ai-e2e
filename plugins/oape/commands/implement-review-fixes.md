@@ -130,7 +130,20 @@ go vet ./...
 ```
 
 ```bash
-# Step 4.3: Run tests to verify fixes don't break existing behavior
+# Step 4.3: Run project linter (if available)
+make lint 2>&1 || echo "LINT_SKIPPED: no lint target available"
+```
+
+If `make lint` reports issues:
+1. Read the linter output to identify which files and lines are flagged
+2. Apply fixes for each finding (e.g., unchecked error returns, unused variables)
+3. Re-run `make lint` to confirm the fix
+4. If a fix cannot be applied after one retry, note it in the summary and continue
+
+If `make lint` fails because the target does not exist, mark it as SKIPPED and continue.
+
+```bash
+# Step 4.4: Run tests to verify fixes don't break existing behavior
 go test ./...
 ```
 
@@ -141,16 +154,16 @@ If any tests fail:
 4. If the fix introduced a regression, revert that fix and note it in the summary
 5. Re-run `go test ./...` to confirm
 
-If compilation, vetting, or tests fail:
+If compilation, vetting, linting, or tests fail:
 1. Read the error output to identify which fix introduced the failure
 2. Attempt to correct the failing fix
-3. Re-run `go build ./...` to confirm the correction
+3. Re-run the failing verification step to confirm the correction
 4. If the correction fails after one retry, revert that specific fix and note it in the summary
 
 **Build Consistency Check:**
 
 ```bash
-# Step 4.4: Check if any types.go files were modified
+# Step 4.5: Check if any types.go files were modified
 git diff --name-only
 ```
 
@@ -186,6 +199,7 @@ INFO Fixes:
 Verification:
   go build ./...  : PASS | FAIL
   go vet ./...    : PASS | FAIL
+  make lint       : PASS | FAIL | SKIPPED (no lint target)
   go test ./...   : PASS | FAIL
 
 Post-Fix Actions Required:
