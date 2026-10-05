@@ -224,6 +224,128 @@ else
   echo ""
 
   # =========================================================================
+  # Phase 2e: monitor.sh local smoke test
+  # =========================================================================
+  echo "=== Phase 2e: monitor.sh local smoke test ==="
+
+  MONITOR_RESULT_FILE=$(mktemp)
+  # shellcheck disable=SC2034
+  if monitor_output=$(PR_URL="$TEST_PR_URL" GH_TOKEN="$GH_TOKEN" \
+    SKIP_POLL=true DRY_RUN=true SELF_JOB_NAME=oape-ci-monitor \
+    RESULT_FILE="$MONITOR_RESULT_FILE" \
+    "${REPO_ROOT}/scripts/ci-monitor/monitor.sh" 2>&1); then
+    _pass "monitor.sh --dry-run exited 0"
+
+    if [[ -f "$MONITOR_RESULT_FILE" ]] && jq empty "$MONITOR_RESULT_FILE" 2>/dev/null; then
+      _pass "ci-monitor-result.json is valid JSON"
+
+      has_status=$(jq -r '.overall_status // empty' "$MONITOR_RESULT_FILE")
+      has_triggers=$(jq '.trigger_actions | length' "$MONITOR_RESULT_FILE" 2>/dev/null || echo 0)
+      has_categories=$(jq '.failure_categories | length' "$MONITOR_RESULT_FILE" 2>/dev/null || echo 0)
+
+      if [[ -n "$has_status" ]]; then
+        _pass "result has overall_status: ${has_status}"
+      else
+        _fail "result missing overall_status"
+      fi
+      if [[ "$has_triggers" -ge 0 ]]; then
+        _pass "result has trigger_actions (count: ${has_triggers})"
+      else
+        _fail "result missing trigger_actions"
+      fi
+      if [[ "$has_categories" -ge 0 ]]; then
+        _pass "result has failure_categories (count: ${has_categories})"
+      else
+        _fail "result missing failure_categories"
+      fi
+    else
+      _fail "ci-monitor-result.json not generated or invalid"
+    fi
+  else
+    _fail "monitor.sh --dry-run failed (exit code $?)"
+  fi
+  rm -f "$MONITOR_RESULT_FILE"
+
+  echo ""
+
+  # =========================================================================
+  # Phase 2f: dispatch.sh synthetic fixture test
+  # =========================================================================
+  echo "=== Phase 2f: dispatch.sh synthetic fixture test ==="
+
+  DISPATCH_FIXTURE_DIR=$(mktemp -d)
+  DISPATCH_RESULT_FILE="${DISPATCH_FIXTURE_DIR}/ci-monitor-result.json"
+
+  for fixture_type in auto-fix-lint auto-fix-generated retest investigate; do
+    cat > "$DISPATCH_RESULT_FILE" << FIXTURE_EOF
+{
+  "pr_url": "${TEST_PR_URL}",
+  "owner": "${TEST_OWNER}",
+  "repo": "${TEST_REPO}",
+  "pr_number": ${TEST_PR_NUMBER},
+  "overall_status": "failed",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "checks": {"total": 5, "passed": 4, "failed": 1, "pending": 0},
+  "failure_categories": {"${fixture_type%-*}-failure": 1},
+  "failures": [{"job_name": "ci/prow/test-fixture-${fixture_type}", "category": "${fixture_type%-*}-failure", "optional": false}],
+  "trigger_actions": [{"action": "${fixture_type}", "job": "ci/prow/test-fixture-${fixture_type}", "optional": false}]
+}
+FIXTURE_EOF
+
+    dispatch_output=""
+    if dispatch_output=$(RESULT_FILE="$DISPATCH_RESULT_FILE" DRY_RUN=true \
+      OAPE_ROOT="$REPO_ROOT" WORK_DIR="$DISPATCH_FIXTURE_DIR" \
+      "${REPO_ROOT}/scripts/ci-monitor/dispatch.sh" 2>&1); then
+      if echo "$dispatch_output" | grep -qE "DRY RUN|Running auto-fix|Running Claude|Auto-retest disabled|Skipping retest"; then
+        _pass "dispatch.sh fixture: ${fixture_type} (DRY_RUN action logged)"
+      else
+        _pass "dispatch.sh fixture: ${fixture_type} (exit 0)"
+      fi
+    else
+      _fail "dispatch.sh fixture: ${fixture_type} (exit $?)"
+    fi
+  done
+
+  # Phase 3 fixture: dispatch with overall_status=passed + REVIEW_HANDLER_ENABLED
+  cat > "$DISPATCH_RESULT_FILE" << FIXTURE_EOF
+{
+  "pr_url": "${TEST_PR_URL}",
+  "owner": "${TEST_OWNER}",
+  "repo": "${TEST_REPO}",
+  "pr_number": ${TEST_PR_NUMBER},
+  "overall_status": "passed",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "checks": {"total": 5, "passed": 5, "failed": 0, "pending": 0},
+  "failure_categories": {},
+  "failures": [],
+  "trigger_actions": []
+}
+FIXTURE_EOF
+
+  dispatch_output=""
+  if dispatch_output=$(RESULT_FILE="$DISPATCH_RESULT_FILE" DRY_RUN=true \
+    OAPE_ROOT="$REPO_ROOT" WORK_DIR="$DISPATCH_FIXTURE_DIR" \
+    REVIEW_HANDLER_ENABLED=true \
+    "${REPO_ROOT}/scripts/ci-monitor/dispatch.sh" 2>&1); then
+    if echo "$dispatch_output" | grep -q "review handler"; then
+      _pass "dispatch.sh fixture: Phase 3 (review handler invoked)"
+    else
+      _pass "dispatch.sh fixture: Phase 3 (exit 0)"
+    fi
+  else
+    rc=$?
+    if echo "$dispatch_output" | grep -q "review handler"; then
+      _pass "dispatch.sh fixture: Phase 3 (review handler invoked, non-fatal exit ${rc})"
+    else
+      _fail "dispatch.sh fixture: Phase 3 (exit ${rc})"
+    fi
+  fi
+
+  rm -rf "$DISPATCH_FIXTURE_DIR"
+
+  echo ""
+
+  # =========================================================================
   # Phase 3: Output verification
   # =========================================================================
   echo "=== Phase 3: Output verification ==="

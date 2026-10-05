@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Source shared safety guardrails
-# shellcheck source=safety.sh
+# shellcheck source=scripts/pr-agent/safety.sh
 source "$SCRIPT_DIR/safety.sh"
 
 # ---------------------------------------------------------------------------
@@ -128,11 +128,15 @@ clone_and_checkout() {
 
   if [[ -d "$workdir/.git" ]]; then
     cd "$workdir"
-    git pull --ff-only 2>/dev/null || true
+    if ! git pull --ff-only 2>/dev/null; then
+      echo "[review] Fast-forward failed (likely force-push), resetting to remote HEAD"
+      git fetch origin 2>/dev/null || true
+      git reset --hard "origin/$(git branch --show-current)" 2>/dev/null || true
+    fi
   else
     gh_retry gh repo clone "${owner}/${repo}" "$workdir" -- --filter=blob:none --single-branch
     cd "$workdir"
-    gh pr checkout "$pr_number"
+    gh pr checkout "$pr_number" --repo "${owner}/${repo}"
     git config user.name "$BOT_USER"
     git config user.email "267347085+${BOT_USER}@users.noreply.github.com"
   fi

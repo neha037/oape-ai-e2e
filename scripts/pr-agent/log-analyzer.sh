@@ -290,7 +290,18 @@ Respond with ONLY a JSON object (no markdown fencing, no explanation) with these
 
           # Try to parse Claude's response as JSON
           parsed=""
-          if parsed=$(echo "$claude_output" | grep -oP '\{[^{}]*\}' | head -1 | jq '.' 2>/dev/null); then
+          if parsed=$(python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+for m in re.finditer(r'\{', text):
+    try:
+        obj = json.loads(text[m.start():])
+        print(json.dumps(obj))
+        sys.exit(0)
+    except Exception:
+        pass
+sys.exit(1)
+" <<< "$claude_output" 2>/dev/null); then
             mode=$(echo "$parsed" | jq -r '.mode // "unknown"')
             root_cause=$(echo "$parsed" | jq -r '.root_cause // "Claude analysis"')
             confidence=$(echo "$parsed" | jq -r '.confidence // "medium"')

@@ -7,7 +7,8 @@ RUN dnf install -y \
         make \
         jq \
         openssl \
-        python3 && \
+        python3 \
+        python3-pyyaml && \
     dnf install -y 'dnf-command(config-manager)' && \
     dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo && \
     dnf install -y gh && \

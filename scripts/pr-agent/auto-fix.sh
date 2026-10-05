@@ -138,7 +138,7 @@ fi
 
 cd "$workdir"
 
-if ! gh pr checkout "$PR_NUMBER" 2>/dev/null; then
+if ! gh pr checkout "$PR_NUMBER" --repo "${OWNER}/${REPO}" 2>/dev/null; then
   echo "[auto-fix] ERROR: Failed to checkout PR #${PR_NUMBER}" >&2
   audit_log "error" "$CATEGORY" "" "" "checkout failed for PR #${PR_NUMBER}"
   exit 1
@@ -293,7 +293,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 # --- Commit + push ---
-if ! check_commit_limit 0; then
+PR_COMMIT_FILE="${RUNNER_TEMP:-/tmp}/pr-commits-${OWNER}-${REPO}-${PR_NUMBER}.txt"
+pr_commits=$(cat "$PR_COMMIT_FILE" 2>/dev/null || echo 0)
+if ! check_commit_limit "$pr_commits"; then
   echo "[auto-fix] Commit limit reached, skipping push" >&2
   audit_log "skipped" "$EFFECTIVE_CATEGORY" "$modified_files" "" "commit limit reached"
   git checkout -- . 2>/dev/null || true
@@ -326,6 +328,8 @@ fi
 
 git push "$push_remote" "HEAD:${remote_branch}"
 increment_commit_count > /dev/null
+pr_commits=$((pr_commits + 1))
+echo "$pr_commits" > "$PR_COMMIT_FILE"
 
 audit_log "auto-fix" "$EFFECTIVE_CATEGORY" "$modified_files" "$sha" "success"
 echo "[auto-fix] Pushed fix: ${sha} (${EFFECTIVE_CATEGORY})"

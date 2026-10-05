@@ -467,39 +467,23 @@ classify_single_failure() {
   content=$(cat "$log_file")
 
   # Install failures (cluster provisioning)
-  if echo "$content" | grep -qiE \
-    'failed to install|cluster installation failed|install.*timed out|'\
-    'waiting for bootstrap|failed to create cluster|'\
-    'level=fatal.*installer|cluster creation failed|bootstrap.*timed out|'\
-    'waiting for bootstrapComplete'; then
+  if echo "$content" | grep -qiE 'failed to install|cluster installation failed|install.*timed out|waiting for bootstrap|failed to create cluster|level=fatal.*installer|cluster creation failed|bootstrap.*timed out|waiting for bootstrapComplete'; then
     echo "install-failure"
   # Build / compile failures
-  elif echo "$content" | grep -qiE \
-    'cannot compile|undefined:|syntax error|cannot use.*as.*in|'\
-    'build.*failed|compilation error|cannot find package|imported and not used'; then
+  elif echo "$content" | grep -qiE 'cannot compile|undefined:|syntax error|cannot use.*as.*in|build.*failed|compilation error|cannot find package|imported and not used'; then
     echo "build-failure"
   # Generated files out of date (check before lint — generated-files errors
   # often co-occur with lint markers but need a different fix command)
-  elif echo "$content" | grep -qiE \
-    'generated code is out of date|make generate|make manifests|deepcopy-gen|zz_generated'; then
+  elif echo "$content" | grep -qiE 'generated code is out of date|make generate|make manifests|deepcopy-gen|zz_generated'; then
     echo "generated-files-failure"
   # Lint / formatting / boilerplate failures
-  elif echo "$content" | grep -qiE \
-    'gofmt|goimports|formatting differs|golangci-lint|golint|staticcheck|revive|lint.*failed|boilerplate'; then
+  elif echo "$content" | grep -qiE 'gofmt|goimports|formatting differs|golangci-lint|golint|staticcheck|revive|lint.*failed|boilerplate'; then
     echo "lint-failure"
   # Test failures
-  elif echo "$content" | grep -qiE \
-    '--- FAIL|FAIL\s|panic:.*test|assertion failed|test.*failed'; then
+  elif echo "$content" | grep -qiE '--- FAIL|FAIL\s|panic:.*test|assertion failed|test.*failed'; then
     echo "test-failure"
   # Infrastructure / transient flakes
-  elif echo "$content" | grep -qiE \
-    'context deadline exceeded|connection refused|i/o timeout|ErrImagePull|ImagePullBackOff|'\
-    'pod sandbox|TLS handshake timeout|quota.*exceeded|unable to provision|'\
-    'registry\.ci\.openshift\.org.*(timeout|error)|'\
-    'etcdserver: request timed out|lease lost|'\
-    'error creating.*instance|InsufficientInstanceCapacity|'\
-    'unable to get lease|failed to acquire lease|'\
-    'dial tcp.*timeout'; then
+  elif echo "$content" | grep -qiE 'context deadline exceeded|connection refused|i/o timeout|ErrImagePull|ImagePullBackOff|pod sandbox|TLS handshake timeout|quota.*exceeded|unable to provision|registry\.ci\.openshift\.org.*(timeout|error)|etcdserver: request timed out|lease lost|error creating.*instance|InsufficientInstanceCapacity|unable to get lease|failed to acquire lease|dial tcp.*timeout'; then
     echo "infra-flake"
   else
     echo "unknown"
@@ -635,7 +619,7 @@ query_sippy_flakes() {
       echo "$updated" > "$analysis_file"
 
       # Reclassify as infra-flake if flake rate is high (>30%)
-      if (( $(echo "$flake_pct > 30" | bc -l 2>/dev/null || echo 0) )); then
+      if jq -e --argjson pct "$flake_pct" -n '$pct > 30' &>/dev/null; then
         updated=$(jq --arg name "$job_name" \
           'map(if .job_name == $name then .category = "infra-flake" else . end)' \
           "$analysis_file")
@@ -759,7 +743,7 @@ generate_report() {
     if [[ -f "$analysis_file" && "$failed" -gt 0 ]]; then
       local job_manifest="${WORK_DIR}/job-manifest.json"
       if [[ "$USE_RELEASE_CONTEXT" == "true" && -f "$job_manifest" ]]; then
-        jq -r '.[] | .job_name' "$analysis_file" 2>/dev/null | while IFS= read -r jn; do
+        while IFS= read -r jn; do
           local short
           # shellcheck disable=SC2001
           short=$(echo "$jn" | sed "s/^pull-ci-${OWNER}-${REPO}-[^-]*-//")
@@ -770,7 +754,7 @@ generate_report() {
           else
             required_failures_count=$((required_failures_count + 1))
           fi
-        done
+        done < <(jq -r '.[] | .job_name' "$analysis_file" 2>/dev/null)
       fi
     fi
 
@@ -1147,7 +1131,10 @@ main() {
   local total_count
   total_count=$(jq 'length' "$checks_file")
 
-  if [[ "$failed_count" -eq 0 && "$total_count" -gt 0 ]]; then
+  local pending_count
+  pending_count=$(jq '[.[] | select(.bucket == "pending")] | length' "$checks_file")
+
+  if [[ "$failed_count" -eq 0 && "$total_count" -gt 0 && "$pending_count" -eq 0 ]]; then
     echo ""
     echo "=== All CI checks passed — generating summary report ==="
     generate_report
@@ -1155,6 +1142,15 @@ main() {
     write_result_json
     echo ""
     echo "[main] CI monitor complete — all checks passed"
+    exit 0
+  elif [[ "$failed_count" -eq 0 && "$pending_count" -gt 0 ]]; then
+    echo ""
+    echo "=== No failures yet — ${pending_count} check(s) still pending ==="
+    generate_report
+    post_report_comment
+    write_result_json
+    echo ""
+    echo "[main] CI monitor complete — ${pending_count} check(s) still pending"
     exit 0
   elif [[ "$total_count" -eq 0 ]]; then
     echo ""

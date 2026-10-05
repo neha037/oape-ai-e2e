@@ -464,7 +464,7 @@ apply_trivial_fixes() {
 
   cd "$workdir"
 
-  if ! gh pr checkout "$pr_number" 2>/dev/null; then
+  if ! gh pr checkout "$pr_number" --repo "${owner}/${repo}" 2>/dev/null; then
     echo "[auto-fix] ERROR: Failed to checkout PR #${pr_number}" >&2
     audit_log "error" "" "" "" "checkout failed for PR #${pr_number}"
     cd "$REPO_ROOT"
@@ -474,16 +474,35 @@ apply_trivial_fixes() {
   # Configure git identity for the bot
   git config user.name "$BOT_USER"
   git config user.email "267347085+${BOT_USER}@users.noreply.github.com"
-  git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${owner}/${repo}.git"
 
   # Determine PR base branch for scoping fixes
   local base_branch
   base_branch=$(gh pr view "$pr_number" --repo "${owner}/${repo}" --json baseRefName -q .baseRefName 2>/dev/null || echo "main")
+
+  # Fork-aware push remote setup (ported from auto-fix.sh)
+  local head_repo
+  head_repo=$(gh pr view "$pr_number" --repo "${owner}/${repo}" --json headRepository,headRepositoryOwner \
+    -q '"\(.headRepositoryOwner.login)/\(.headRepository.name)"' 2>/dev/null || echo "${owner}/${repo}")
+  local remote_branch
+  remote_branch=$(gh pr view "$pr_number" --repo "${owner}/${repo}" --json headRefName -q .headRefName 2>/dev/null || echo "")
+  local push_remote
+  if [[ "$head_repo" != "${owner}/${repo}" ]]; then
+    git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${head_repo}.git" 2>/dev/null || \
+      git remote set-url fork "https://x-access-token:${GH_TOKEN}@github.com/${head_repo}.git"
+    push_remote="fork"
+  else
+    git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${owner}/${repo}.git"
+    push_remote="origin"
+  fi
+  if [[ -z "$remote_branch" ]]; then
+    remote_branch=$(git branch --show-current)
+  fi
+
   git fetch origin "${base_branch}" --depth=1 2>/dev/null || true
 
   local pr_commit_count=0
 
-  echo "$fixable" | jq -c '.[]' | while IFS= read -r fix; do
+  while IFS= read -r fix; do
     local category
     category=$(echo "$fix" | jq -r '.category')
 
@@ -581,21 +600,22 @@ apply_trivial_fixes() {
     local sha
     sha=$(git rev-parse HEAD)
 
-    # Pull before push to handle concurrent pushes
-    if ! git pull --rebase origin HEAD 2>/dev/null; then
+    # Rebase onto the latest PR head (not the remote's default branch)
+    git fetch "$push_remote" "$remote_branch" 2>/dev/null || true
+    if ! git rebase "${push_remote}/${remote_branch}" 2>/dev/null; then
       git rebase --abort 2>/dev/null || true
       audit_log "reverted" "$category" "$modified_files" "$sha" "rebase conflict — concurrent push detected"
       git reset --hard HEAD~1 2>/dev/null || true
       continue
     fi
 
-    git push origin HEAD
+    git push "$push_remote" "HEAD:${remote_branch}"
     pr_commit_count=$((pr_commit_count + 1))
     increment_commit_count > /dev/null
 
     audit_log "auto-fix" "$category" "$modified_files" "$sha" "success"
     echo "[auto-fix] Pushed fix: ${sha} (${category})"
-  done
+  done < <(echo "$fixable" | jq -c '.[]')
 
   cd "$REPO_ROOT"
 }

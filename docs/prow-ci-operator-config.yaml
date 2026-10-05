@@ -45,7 +45,8 @@
 #           dnf install -y gh && \
 #           dnf clean all
 #       WORKDIR /app
-#       RUN git clone --depth 1 -b main https://github.com/openshift-eng/oape-ai-e2e.git /tmp/oape && \
+#       # During testing: clone CI-Monitor branch from fork; change to openshift-eng/main after sign-off
+#       RUN git clone --depth 1 -b CI-Monitor https://github.com/neha037/oape-ai-e2e.git /tmp/oape && \
 #           cp -r /tmp/oape/scripts /app/scripts && \
 #           cp -r /tmp/oape/plugins /plugins && \
 #           mkdir -p /config && cp -r /tmp/oape/deploy/config/* /config/ && \
@@ -77,7 +78,7 @@
 # ─────────────────────────────────────────────────────────────────────
 # 3. Add presubmit test under tests[]
 # ─────────────────────────────────────────────────────────────────────
-- always_run: true
+- always_run: false
   as: oape-ci-monitor
   optional: true
   steps:
@@ -90,20 +91,21 @@
 
         # --- Rehearsal detection ---
         # Prow rehearsal runs against openshift/release, not the target repo.
-        # Switch to a real target-repo PR to validate the full pipeline.
+        # Switch to a pinned target-repo PR to validate the full pipeline.
         if [[ "${REPO_NAME}" == "release" && "${REPO_OWNER}" == "openshift" ]]; then
           echo "[setup] Detected openshift/release context — switching to test target"
           export REPO_OWNER="REPO_ORG"
           export REPO_NAME="REPO_NAME"
-          TEST_PR=$(curl -s "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls?state=open&per_page=1" \
-            | python3 -c "import sys,json; data=json.load(sys.stdin); print(data[0]['number'] if data else '')" 2>/dev/null || echo "")
-          if [[ -z "$TEST_PR" ]]; then
-            echo "[setup] No open PRs found on ${REPO_OWNER}/${REPO_NAME} — skipping"
-            exit 0
-          fi
-          export PULL_NUMBER="$TEST_PR"
+        fi
+
+        # --- Pin to explicit test PR (never pick a random/first-open PR) ---
+        if [[ -n "${OAPE_TEST_PR_NUMBER:-}" ]]; then
+          export PULL_NUMBER="$OAPE_TEST_PR_NUMBER"
           export PR_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PULL_NUMBER}"
-          echo "[setup] Testing against ${REPO_OWNER}/${REPO_NAME}#${PULL_NUMBER}"
+          echo "[setup] Testing against pinned PR ${REPO_OWNER}/${REPO_NAME}#${PULL_NUMBER}"
+        else
+          echo "[setup] ERROR: OAPE_TEST_PR_NUMBER not set — refusing to pick a random PR" >&2
+          exit 1
         fi
 
         # --- GitHub auth: try App token, fall back to GITHUB_TOKEN ---
@@ -160,6 +162,12 @@
         export CLAUDE_CODE_USE_VERTEX="1"
         export CLOUD_ML_REGION="global"
         export ANTHROPIC_VERTEX_PROJECT_ID="itpc-gcp-hcm-pe-eng-claude"
+
+        # --- Staged testing env vars ---
+        # Stage A (DRY_RUN): set DRY_RUN=true, REVIEW_HANDLER_ENABLED=false
+        # Stage B (live dispatch): unset DRY_RUN, REVIEW_HANDLER_ENABLED=false
+        # Stage C (Phase 3): unset DRY_RUN, REVIEW_HANDLER_ENABLED=true
+        export DRY_RUN="${DRY_RUN:-false}"
 
         # --- Run CI monitor ---
         export PR_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PULL_NUMBER}"
